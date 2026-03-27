@@ -81,8 +81,3 @@ class PromptBuilder:
         messages = [{"role": m.role, "content": m.content} for m in history]
         messages.append({"role": "user", "content": user_message})
         return messages
-
-    def _build_messages(self, history: list[ChatMessage], user_message: str) -> list[dict]:
-        messages = [{"role": m.role, "content": m.content} for m in history]
-        messages.append({"role": "user", "content": user_message})
-        return messages

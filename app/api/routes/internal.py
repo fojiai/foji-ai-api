@@ -10,6 +10,7 @@ Current endpoints:
 """
 
 import logging
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel
@@ -31,7 +32,8 @@ router = APIRouter(prefix="/internal", tags=["Internal"])
 
 def verify_internal_key(x_internal_key: str | None = Header(default=None)) -> None:
     """Validates the shared internal API key."""
-    if not x_internal_key or x_internal_key != get_settings().internal_api_key:
+    expected = get_settings().internal_api_key
+    if not x_internal_key or not expected or not secrets.compare_digest(x_internal_key, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
 
 
@@ -75,7 +77,7 @@ async def whatsapp_chat(
 
     # 3. Build file context
     file_ctx_svc = FileContextService()
-    file_context = file_ctx_svc.build(agent)
+    file_context = await file_ctx_svc.build(agent)
 
     # 4. Build prompt
     system_prompt, messages = PromptBuilder().build(

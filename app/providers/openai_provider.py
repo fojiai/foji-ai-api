@@ -8,8 +8,17 @@ from app.core.exceptions import ProviderException
 
 logger = logging.getLogger(__name__)
 
-# Only used if the AIModels table is empty — should never happen in production.
 _FALLBACK_MODEL_ID = "gpt-5.4-nano"
+
+# Singleton client — reused across all requests to preserve connection pool.
+_client = None
+
+
+def _get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=get_settings().openai_api_key)
+    return _client
 
 
 class OpenAIProvider:
@@ -17,7 +26,7 @@ class OpenAIProvider:
 
     def __init__(self, model_id: str = _FALLBACK_MODEL_ID) -> None:
         self._model_id = model_id
-        self._client = AsyncOpenAI(api_key=get_settings().openai_api_key)
+        self._client = _get_client()
 
     async def stream_chat(
         self,

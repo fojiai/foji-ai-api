@@ -9,9 +9,17 @@ from app.core.exceptions import ProviderException
 
 logger = logging.getLogger(__name__)
 
-# Only used if the AIModels table is empty — should never happen in production.
-# This alias always resolves to the latest Flash Lite version automatically.
 _FALLBACK_MODEL_ID = "gemini-flash-lite-latest"
+
+# Singleton client — reused across all requests to preserve connection pool.
+_client = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=get_settings().gemini_api_key)
+    return _client
 
 
 class GeminiProvider:
@@ -19,7 +27,7 @@ class GeminiProvider:
 
     def __init__(self, model_id: str = _FALLBACK_MODEL_ID) -> None:
         self._model_id = model_id
-        self._client = genai.Client(api_key=get_settings().gemini_api_key)
+        self._client = _get_client()
 
     async def stream_chat(
         self,

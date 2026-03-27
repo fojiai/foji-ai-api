@@ -11,6 +11,7 @@ Table schema:
   TTL: expires_at    (90 days from creation, Unix epoch seconds)
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -59,12 +60,12 @@ class ChatHistoryService:
     async def load(self, session_id: str) -> list[ChatMessage]:
         """Return the last N messages for this session, oldest first."""
         try:
-            response = self._table.query(
+            response = await asyncio.to_thread(
+                self._table.query,
                 KeyConditionExpression=Key("session_id").eq(session_id),
-                ScanIndexForward=True,  # oldest first
+                ScanIndexForward=True,
             )
             items = response.get("Items", [])
-            # Keep only the last N
             items = items[-self._max_messages :]
             return [ChatMessage(role=item["role"], content=item["content"]) for item in items]
         except Exception:
@@ -82,46 +83,50 @@ class ChatHistoryService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
     ) -> None:
-        """Persist the user/assistant pair. Fire-and-forget friendly.
-
-        Token counts are accepted from providers that expose them directly
-        (e.g. OpenAI usage chunk). If omitted, a character-based estimate is used.
-        """
+        """Persist the user/assistant pair. Fire-and-forget friendly."""
         now_ms = int(time.time() * 1000)
         expires_at = int(time.time()) + _TTL_SECONDS
-        date_partition = date.today().isoformat()  # "YYYY-MM-DD"
+        date_partition = date.today().isoformat()
 
-        # Estimate tokens if not provided by the provider
         actual_input_tokens = input_tokens if input_tokens is not None else _estimate_tokens(user_message)
         actual_output_tokens = output_tokens if output_tokens is not None else _estimate_tokens(assistant_message)
 
+        items = [
+            {
+                "session_id": session_id,
+                "timestamp": Decimal(now_ms),
+                "role": "user",
+                "content": user_message,
+                "provider": provider,
+                "agent_id": agent_id,
+                "company_id": company_id,
+                "input_tokens": actual_input_tokens,
+                "output_tokens": 0,
+                "date_partition": date_partition,
+                "expires_at": expires_at,
+            },
+            {
+                "session_id": session_id,
+                "timestamp": Decimal(now_ms + 1),
+                "role": "assistant",
+                "content": assistant_message,
+                "provider": provider,
+                "agent_id": agent_id,
+                "company_id": company_id,
+                "input_tokens": 0,
+                "output_tokens": actual_output_tokens,
+                "date_partition": date_partition,
+                "expires_at": expires_at,
+            },
+        ]
+
         try:
-            with self._table.batch_writer() as batch:
-                batch.put_item(Item={
-                    "session_id": session_id,
-                    "timestamp": Decimal(now_ms),
-                    "role": "user",
-                    "content": user_message,
-                    "provider": provider,
-                    "agent_id": agent_id,
-                    "company_id": company_id,
-                    "input_tokens": actual_input_tokens,
-                    "output_tokens": 0,  # user turn has no output tokens
-                    "date_partition": date_partition,
-                    "expires_at": expires_at,
-                })
-                batch.put_item(Item={
-                    "session_id": session_id,
-                    "timestamp": Decimal(now_ms + 1),
-                    "role": "assistant",
-                    "content": assistant_message,
-                    "provider": provider,
-                    "agent_id": agent_id,
-                    "company_id": company_id,
-                    "input_tokens": 0,  # assistant turn tracks output only
-                    "output_tokens": actual_output_tokens,
-                    "date_partition": date_partition,
-                    "expires_at": expires_at,
-                })
+            await asyncio.to_thread(self._write_batch, items)
         except Exception:
             logger.exception("Failed to save chat history for session %s", session_id)
+
+    def _write_batch(self, items: list[dict]) -> None:
+        """Sync batch write — runs in a thread via asyncio.to_thread."""
+        with self._table.batch_writer() as batch:
+            for item in items:
+                batch.put_item(Item=item)

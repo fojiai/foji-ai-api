@@ -26,7 +26,7 @@ class FileContextService:
         self._max_chars = cfg.file_context_max_chars
         self._s3 = S3ContentService()
 
-    def build(self, agent: Agent) -> str:
+    async def build(self, agent: Agent) -> str:
         """
         Load all chunk texts for the agent's Ready files from S3
         and return a single concatenated context string, capped at max_chars.
@@ -46,7 +46,7 @@ class FileContextService:
             if total_chars >= self._max_chars:
                 break
 
-            chunks = self._s3.read_chunks(file.s3_chunks_key)
+            chunks = await self._s3.read_chunks(file.s3_chunks_key)
             if not chunks:
                 logger.warning(
                     "No chunks loaded from S3 for file_id=%s key=%s",

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     aws_dynamodb_table: str = "foji-chats-dev"
     aws_s3_bucket: str = ""
 
+    # Database pool
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_recycle: int = 1800
+
     # Chat behaviour
     chat_history_max_messages: int = 20
     file_context_max_chars: int = 50_000

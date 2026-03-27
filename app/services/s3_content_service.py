@@ -3,8 +3,11 @@ Centralized S3 content reader for foji-ai-api.
 
 Handles reading extraction artifacts (raw.txt, normalized.txt, chunks.jsonl)
 that foji-worker uploads after processing a file.
+
+All reads run in a thread pool via asyncio.to_thread to avoid blocking the event loop.
 """
 
+import asyncio
 import json
 import logging
 
@@ -27,8 +30,8 @@ class S3ContentService:
             aws_secret_access_key=cfg.aws_secret_access_key or None,
         )
 
-    def read_text(self, s3_key: str) -> str | None:
-        """Read a plain text file from S3. Returns None if not found."""
+    def _read_text_sync(self, s3_key: str) -> str | None:
+        """Sync S3 read — called via asyncio.to_thread."""
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=s3_key)
             return response["Body"].read().decode("utf-8")
@@ -38,13 +41,13 @@ class S3ContentService:
                 return None
             raise
 
-    def read_chunks(self, s3_key: str) -> list[dict]:
-        """
-        Read a JSONL chunks file from S3.
-        Each line is: {"chunk_index": 0, "text": "...", "token_count": 123}
-        Returns empty list if not found.
-        """
-        raw = self.read_text(s3_key)
+    async def read_text(self, s3_key: str) -> str | None:
+        """Read a plain text file from S3 without blocking the event loop."""
+        return await asyncio.to_thread(self._read_text_sync, s3_key)
+
+    async def read_chunks(self, s3_key: str) -> list[dict]:
+        """Read a JSONL chunks file from S3 without blocking the event loop."""
+        raw = await self.read_text(s3_key)
         if not raw:
             return []
         chunks = []
@@ -59,7 +62,6 @@ class S3ContentService:
 
     @staticmethod
     def build_extraction_path(company_id: int, file_id: int, version: int) -> str:
-        """Canonical S3 prefix for a file's extraction artifacts."""
         return f"tenant/{company_id}/files/{file_id}/extractions/{version}"
 
     @staticmethod

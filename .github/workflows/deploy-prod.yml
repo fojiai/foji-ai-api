@@ -10,10 +10,12 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: foji-ai-api-prod
+  ECR_REPOSITORY: foji-ai-api-dev
   ECS_CLUSTER: foji-prod
   ECS_SERVICE: foji-ai-api-prod
   CONTAINER_NAME: foji-ai-api
+  TASK_FAMILY: foji-ai-api-prod
+  SSM_PREFIX: /foji/prod/ai-api/
 
 jobs:
   deploy:
@@ -49,29 +51,109 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Download current ECS task definition
+      - name: Ensure ECS cluster exists
         run: |
-          aws ecs describe-task-definition \
-            --task-definition $ECS_SERVICE \
-            --query taskDefinition > task-definition.json
+          STATUS=$(aws ecs describe-clusters --clusters $ECS_CLUSTER \
+            --query "clusters[0].status" --output text 2>/dev/null || echo "MISSING")
+          if [ "$STATUS" = "MISSING" ] || [ "$STATUS" = "None" ] || [ "$STATUS" = "INACTIVE" ]; then
+            echo "Creating ECS cluster..."
+            aws ecs create-cluster --cluster-name $ECS_CLUSTER \
+              --capacity-providers FARGATE --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1
+          else
+            echo "Cluster already exists (status: $STATUS)"
+          fi
 
-      - name: Update image in task definition
+      - name: Get AWS Account ID
+        id: aws-account
+        run: echo "id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
+
+      - name: Register or update task definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.build-image.outputs.image }}
+        env:
+          IMAGE: ${{ steps.build-image.outputs.image }}
+          AWS_ACCOUNT_ID: ${{ steps.aws-account.outputs.id }}
+        run: |
+          TASK_DEF='{
+            "family": "'"$TASK_FAMILY"'",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "512",
+            "memory": "1024",
+            "executionRoleArn": "${{ secrets.ECS_EXECUTION_ROLE_ARN }}",
+            "taskRoleArn": "${{ secrets.ECS_TASK_ROLE_ARN }}",
+            "containerDefinitions": [{
+              "name": "'"$CONTAINER_NAME"'",
+              "image": "'"$IMAGE"'",
+              "essential": true,
+              "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
+              "environment": [
+                {"name": "ENVIRONMENT", "value": "production"},
+                {"name": "PORT", "value": "8000"},
+                {"name": "AWS_REGION", "value": "'"$AWS_REGION"'"},
+                {"name": "AWS_DYNAMODB_TABLE", "value": "foji-chats-prod"},
+                {"name": "AWS_S3_BUCKET", "value": "foji-files-prod"}
+              ],
+              "secrets": [
+                {"name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'DATABASE_URL"},
+                {"name": "INTERNAL_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'INTERNAL_API_KEY"},
+                {"name": "OPENAI_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'OPENAI_API_KEY"},
+                {"name": "GEMINI_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'GEMINI_API_KEY"},
+                {"name": "CORS_ORIGINS", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'CORS_ORIGINS"}
+              ],
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/ecs/'"$TASK_FAMILY"'",
+                  "awslogs-region": "'"$AWS_REGION"'",
+                  "awslogs-stream-prefix": "ecs",
+                  "awslogs-create-group": "true"
+                }
+              }
+            }]
+          }'
 
-      - name: Deploy to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> $GITHUB_OUTPUT
+
+      - name: Create or update ECS service
+        env:
+          TASK_DEF_ARN: ${{ steps.task-def.outputs.arn }}
+        run: |
+          SERVICE_STATUS=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE \
+            --query "services[0].status" --output text 2>/dev/null || echo "MISSING")
+
+          if [ "$SERVICE_STATUS" = "MISSING" ] || [ "$SERVICE_STATUS" = "None" ] || [ "$SERVICE_STATUS" = "INACTIVE" ]; then
+            echo "Creating ECS service..."
+            aws ecs create-service \
+              --cluster $ECS_CLUSTER \
+              --service-name $ECS_SERVICE \
+              --task-definition "$TASK_DEF_ARN" \
+              --desired-count 1 \
+              --launch-type FARGATE \
+              --network-configuration '{
+                "awsvpcConfiguration": {
+                  "subnets": ${{ secrets.ECS_SUBNET_IDS }},
+                  "securityGroups": ${{ secrets.ECS_SECURITY_GROUP_IDS }},
+                  "assignPublicIp": "ENABLED"
+                }
+              }'
+          else
+            echo "Updating ECS service..."
+            aws ecs update-service \
+              --cluster $ECS_CLUSTER \
+              --service $ECS_SERVICE \
+              --task-definition "$TASK_DEF_ARN" \
+              --force-new-deployment
+          fi
+
+      - name: Wait for service stability
+        run: |
+          aws ecs wait services-stable \
+            --cluster $ECS_CLUSTER \
+            --services $ECS_SERVICE
+          echo "ECS service is stable."

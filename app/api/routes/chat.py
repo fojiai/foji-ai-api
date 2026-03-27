@@ -12,6 +12,7 @@ Flow:
   8. Persist history (best-effort)
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -20,6 +21,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
+
+STREAM_TIMEOUT_SECONDS = 300  # 5 minutes max per chat stream
 
 from app.core.database import get_db
 from app.core.exceptions import AgentInactiveException, AgentNotFoundException, ProviderException
@@ -74,7 +77,7 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     history = await _history_svc.load(session_id)
 
     # 5. File context
-    file_context = _file_context_svc.build(agent)
+    file_context = await _file_context_svc.build(agent)
 
     # 6. Prompt
     system_prompt, messages = _prompt_builder.build(agent, req.message, history, file_context)
@@ -99,9 +102,10 @@ async def _stream(
 ) -> AsyncIterator[str]:
     collected: list[str] = []
     try:
-        async for chunk in provider.stream_chat(messages, system_prompt):
-            collected.append(chunk)
-            yield json.dumps({"chunk": chunk})
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            async for chunk in provider.stream_chat(messages, system_prompt):
+                collected.append(chunk)
+                yield json.dumps({"chunk": chunk})
 
         full_response = "".join(collected)
 
@@ -116,6 +120,9 @@ async def _stream(
 
         yield json.dumps({"done": True, "session_id": session_id})
 
+    except TimeoutError:
+        logger.warning("Stream timed out after %ds for session=%s", STREAM_TIMEOUT_SECONDS, session_id)
+        yield json.dumps({"error": "Response timed out. Please try again.", "done": True})
     except ProviderException as exc:
         logger.error("Provider error during stream: %s", exc)
         yield json.dumps({"error": "AI provider error. Please try again.", "done": True})
