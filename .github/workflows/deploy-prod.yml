@@ -141,6 +141,11 @@ jobs:
               --task-definition "$TASK_DEF_ARN" \
               --desired-count 1 \
               --launch-type FARGATE \
+              --deployment-configuration '{
+                "deploymentCircuitBreaker": {"enable": true, "rollback": true},
+                "minimumHealthyPercent": 0,
+                "maximumPercent": 200
+              }' \
               --network-configuration '{
                 "awsvpcConfiguration": {
                   "subnets": ${{ secrets.ECS_SUBNET_IDS }},
