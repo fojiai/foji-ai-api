@@ -55,18 +55,8 @@ jobs:
         run: |
           IMAGE_CONFIG='{
             "RuntimeEnvironmentVariables": {
-              "ENVIRONMENT": "production",
-              "PORT": "8000",
-              "AWS_REGION": "'"$AWS_REGION"'",
-              "AWS_DYNAMODB_TABLE": "foji-chats-dev",
-              "AWS_S3_BUCKET": "foji-files-dev"
-            },
-            "RuntimeEnvironmentSecrets": {
-              "DATABASE_URL": "arn:aws:ssm:'"$AWS_REGION"':${{ secrets.AWS_ACCOUNT_ID }}:parameter'"$SSM_PREFIX"'DATABASE_URL",
-              "INTERNAL_API_KEY": "arn:aws:ssm:'"$AWS_REGION"':${{ secrets.AWS_ACCOUNT_ID }}:parameter'"$SSM_PREFIX"'INTERNAL_API_KEY",
-              "OPENAI_API_KEY": "arn:aws:ssm:'"$AWS_REGION"':${{ secrets.AWS_ACCOUNT_ID }}:parameter'"$SSM_PREFIX"'OPENAI_API_KEY",
-              "GEMINI_API_KEY": "arn:aws:ssm:'"$AWS_REGION"':${{ secrets.AWS_ACCOUNT_ID }}:parameter'"$SSM_PREFIX"'GEMINI_API_KEY",
-              "CORS_ORIGINS": "arn:aws:ssm:'"$AWS_REGION"':${{ secrets.AWS_ACCOUNT_ID }}:parameter'"$SSM_PREFIX"'CORS_ORIGINS"
+              "AWS_SSM_PREFIX": "'"$SSM_PREFIX"'",
+              "AWS_REGION": "'"$AWS_REGION"'"
             },
             "Port": "8000"
           }'

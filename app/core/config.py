@@ -1,5 +1,11 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.ssm import load_ssm_params
+
+# Load SSM params into env vars before Settings is ever instantiated.
+load_ssm_params()
 
 
 class Settings(BaseSettings):

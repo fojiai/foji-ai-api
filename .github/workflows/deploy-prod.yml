@@ -10,16 +10,13 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: foji-ai-api-dev
-  ECS_CLUSTER: foji-prod
-  ECS_SERVICE: foji-ai-api-prod
-  CONTAINER_NAME: foji-ai-api
-  TASK_FAMILY: foji-ai-api-prod
+  ECR_REPOSITORY: foji-ai-api-prod
+  APP_RUNNER_SERVICE: foji-ai-api-prod
   SSM_PREFIX: /foji/prod/ai-api/
 
 jobs:
   deploy:
-    name: Build & Deploy to Production (ECS Fargate)
+    name: Build & Deploy to Production (App Runner)
     runs-on: ubuntu-latest
     environment: production
 
@@ -44,6 +41,11 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY 2>/dev/null || \
+            aws ecr create-repository --repository-name $ECR_REPOSITORY --image-scanning-configuration scanOnPush=true
+
       - name: Build, tag, and push image to ECR
         id: build-image
         env:
@@ -54,117 +56,88 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Ensure ECS cluster exists
-        run: |
-          # Ensure ECS service-linked role exists (needed for first-time ECS usage)
-          if aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com 2>/dev/null; then
-            echo "Created ECS service-linked role, waiting for propagation..."
-            sleep 10
-          fi
-
-          STATUS=$(aws ecs describe-clusters --clusters $ECS_CLUSTER \
-            --query "clusters[0].status" --output text 2>/dev/null || echo "MISSING")
-          if [ "$STATUS" = "MISSING" ] || [ "$STATUS" = "None" ] || [ "$STATUS" = "INACTIVE" ]; then
-            echo "Creating ECS cluster..."
-            aws ecs create-cluster --cluster-name $ECS_CLUSTER \
-              --capacity-providers FARGATE --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1
-          else
-            echo "Cluster already exists (status: $STATUS)"
-          fi
-
-      - name: Get AWS Account ID
-        id: aws-account
-        run: echo "id=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_OUTPUT
-
-      - name: Register or update task definition
-        id: task-def
+      - name: Deploy to App Runner (create or update)
         env:
           IMAGE: ${{ steps.build-image.outputs.image }}
-          AWS_ACCOUNT_ID: ${{ steps.aws-account.outputs.id }}
         run: |
-          TASK_DEF='{
-            "family": "'"$TASK_FAMILY"'",
-            "networkMode": "awsvpc",
-            "requiresCompatibilities": ["FARGATE"],
-            "cpu": "512",
-            "memory": "1024",
-            "executionRoleArn": "${{ secrets.ECS_EXECUTION_ROLE_ARN }}",
-            "taskRoleArn": "${{ secrets.ECS_TASK_ROLE_ARN }}",
-            "containerDefinitions": [{
-              "name": "'"$CONTAINER_NAME"'",
-              "image": "'"$IMAGE"'",
-              "essential": true,
-              "portMappings": [{"containerPort": 8000, "protocol": "tcp"}],
-              "environment": [
-                {"name": "ENVIRONMENT", "value": "production"},
-                {"name": "PORT", "value": "8000"},
-                {"name": "AWS_REGION", "value": "'"$AWS_REGION"'"},
-                {"name": "AWS_DYNAMODB_TABLE", "value": "foji-chats-prod"},
-                {"name": "AWS_S3_BUCKET", "value": "foji-files-prod"}
-              ],
-              "secrets": [
-                {"name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'DATABASE_URL"},
-                {"name": "INTERNAL_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'INTERNAL_API_KEY"},
-                {"name": "OPENAI_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'OPENAI_API_KEY"},
-                {"name": "GEMINI_API_KEY", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'GEMINI_API_KEY"},
-                {"name": "CORS_ORIGINS", "valueFrom": "arn:aws:ssm:'"$AWS_REGION"':'"$AWS_ACCOUNT_ID"':parameter'"$SSM_PREFIX"'CORS_ORIGINS"}
-              ],
-              "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                  "awslogs-group": "/ecs/'"$TASK_FAMILY"'",
-                  "awslogs-region": "'"$AWS_REGION"'",
-                  "awslogs-stream-prefix": "ecs",
-                  "awslogs-create-group": "true"
-                }
-              }
-            }]
+          IMAGE_CONFIG='{
+            "RuntimeEnvironmentVariables": {
+              "AWS_SSM_PREFIX": "'"$SSM_PREFIX"'",
+              "AWS_REGION": "'"$AWS_REGION"'"
+            },
+            "Port": "8000"
           }'
 
-          ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$TASK_DEF" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "arn=$ARN" >> $GITHUB_OUTPUT
+          SERVICE_ARN=$(aws apprunner list-services \
+            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" \
+            --output text)
 
-      - name: Create or update ECS service
-        env:
-          TASK_DEF_ARN: ${{ steps.task-def.outputs.arn }}
-        run: |
-          SERVICE_STATUS=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE \
-            --query "services[0].status" --output text 2>/dev/null || echo "MISSING")
-
-          if [ "$SERVICE_STATUS" = "MISSING" ] || [ "$SERVICE_STATUS" = "None" ] || [ "$SERVICE_STATUS" = "INACTIVE" ]; then
-            echo "Creating ECS service..."
-            aws ecs create-service \
-              --cluster $ECS_CLUSTER \
-              --service-name $ECS_SERVICE \
-              --task-definition "$TASK_DEF_ARN" \
-              --desired-count 1 \
-              --launch-type FARGATE \
-              --deployment-configuration '{
-                "deploymentCircuitBreaker": {"enable": true, "rollback": true},
-                "minimumHealthyPercent": 0,
-                "maximumPercent": 200
-              }' \
-              --network-configuration '{
-                "awsvpcConfiguration": {
-                  "subnets": ${{ secrets.ECS_SUBNET_IDS }},
-                  "securityGroups": ${{ secrets.ECS_SECURITY_GROUP_IDS }},
-                  "assignPublicIp": "ENABLED"
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" = "None" ]; then
+            echo "Creating new App Runner service..."
+            aws apprunner create-service \
+              --service-name ${{ env.APP_RUNNER_SERVICE }} \
+              --source-configuration '{
+                "AuthenticationConfiguration": {
+                  "AccessRoleArn": "${{ secrets.APP_RUNNER_ECR_ROLE_ARN }}"
+                },
+                "AutoDeploymentsEnabled": false,
+                "ImageRepository": {
+                  "ImageIdentifier": "'"$IMAGE"'",
+                  "ImageRepositoryType": "ECR",
+                  "ImageConfiguration": '"$IMAGE_CONFIG"'
                 }
+              }' \
+              --instance-configuration '{
+                "Cpu": "0.5 vCPU",
+                "Memory": "1 GB",
+                "InstanceRoleArn": "${{ secrets.APP_RUNNER_INSTANCE_ROLE_ARN }}"
+              }' \
+              --health-check-configuration '{
+                "Protocol": "HTTP",
+                "Path": "/health",
+                "Interval": 20,
+                "Timeout": 5,
+                "HealthyThreshold": 1,
+                "UnhealthyThreshold": 3
               }'
           else
-            echo "Updating ECS service..."
-            aws ecs update-service \
-              --cluster $ECS_CLUSTER \
-              --service $ECS_SERVICE \
-              --task-definition "$TASK_DEF_ARN" \
-              --force-new-deployment
+            echo "Updating existing App Runner service..."
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --source-configuration '{
+                "AuthenticationConfiguration": {
+                  "AccessRoleArn": "${{ secrets.APP_RUNNER_ECR_ROLE_ARN }}"
+                },
+                "AutoDeploymentsEnabled": false,
+                "ImageRepository": {
+                  "ImageIdentifier": "'"$IMAGE"'",
+                  "ImageRepositoryType": "ECR",
+                  "ImageConfiguration": '"$IMAGE_CONFIG"'
+                }
+              }' \
+              --instance-configuration '{
+                "InstanceRoleArn": "${{ secrets.APP_RUNNER_INSTANCE_ROLE_ARN }}"
+              }'
           fi
 
-      - name: Wait for service stability
+      - name: Wait for App Runner to stabilize
         run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services $ECS_SERVICE
-          echo "ECS service is stable."
+          SERVICE_ARN=$(aws apprunner list-services \
+            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}'].ServiceArn" \
+            --output text)
+          for i in $(seq 1 30); do
+            STATUS=$(aws apprunner describe-service \
+              --service-arn "$SERVICE_ARN" \
+              --query "Service.Status" --output text)
+            echo "Status: $STATUS (attempt $i/30)"
+            if [ "$STATUS" = "RUNNING" ]; then
+              URL=$(aws apprunner describe-service \
+                --service-arn "$SERVICE_ARN" \
+                --query "Service.ServiceUrl" --output text)
+              echo "## Production Deployment" >> $GITHUB_STEP_SUMMARY
+              echo "**URL**: https://$URL" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "Deployment timed out" && exit 1
