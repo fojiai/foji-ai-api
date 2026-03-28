@@ -56,6 +56,9 @@ jobs:
 
       - name: Ensure ECS cluster exists
         run: |
+          # Ensure ECS service-linked role exists (needed for first-time ECS usage)
+          aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com 2>/dev/null || true
+
           STATUS=$(aws ecs describe-clusters --clusters $ECS_CLUSTER \
             --query "clusters[0].status" --output text 2>/dev/null || echo "MISSING")
           if [ "$STATUS" = "MISSING" ] || [ "$STATUS" = "None" ] || [ "$STATUS" = "INACTIVE" ]; then
