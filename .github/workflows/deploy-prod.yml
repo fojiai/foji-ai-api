@@ -58,14 +58,15 @@ jobs:
 
       - name: Deploy to App Runner (create or update)
         env:
-          IMAGE: ${{ steps.build-image.outputs.image }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           IMAGE_CONFIG='{
+            "Port": "8000",
             "RuntimeEnvironmentVariables": {
               "AWS_SSM_PREFIX": "'"$SSM_PREFIX"'",
               "AWS_REGION": "'"$AWS_REGION"'"
-            },
-            "Port": "8000"
+            }
           }'
 
           SERVICE_ARN=$(aws apprunner list-services \
@@ -82,7 +83,7 @@ jobs:
                 },
                 "AutoDeploymentsEnabled": false,
                 "ImageRepository": {
-                  "ImageIdentifier": "'"$IMAGE"'",
+                  "ImageIdentifier": "'$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG'",
                   "ImageRepositoryType": "ECR",
                   "ImageConfiguration": '"$IMAGE_CONFIG"'
                 }
@@ -110,7 +111,7 @@ jobs:
                 },
                 "AutoDeploymentsEnabled": false,
                 "ImageRepository": {
-                  "ImageIdentifier": "'"$IMAGE"'",
+                  "ImageIdentifier": "'$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG'",
                   "ImageRepositoryType": "ECR",
                   "ImageConfiguration": '"$IMAGE_CONFIG"'
                 }

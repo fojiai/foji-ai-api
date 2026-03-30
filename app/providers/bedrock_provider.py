@@ -7,6 +7,7 @@ import boto3
 
 from app.core.config import get_settings
 from app.core.exceptions import ProviderException
+from app.services.credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
@@ -16,20 +17,33 @@ _FALLBACK_MODEL_ID = "amazon.nova-2-lite-v1:0"
 # Max 10 concurrent Bedrock streams per ECS task.
 _bedrock_pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="bedrock")
 
-# Singleton client — reused across all requests to preserve connection pool.
 _client = None
+_client_key = ""
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        settings = get_settings()
+async def _get_client():
+    global _client, _client_key
+    access_key = await get_credential("AWS_ACCESS_KEY_ID")
+    secret_key = await get_credential("AWS_SECRET_ACCESS_KEY")
+    region = await get_credential("AWS_BEDROCK_REGION")
+
+    settings = get_settings()
+    if not access_key:
+        access_key = settings.aws_access_key_id
+    if not secret_key:
+        secret_key = settings.aws_secret_access_key
+    if not region:
+        region = settings.aws_bedrock_region
+
+    cache_key = f"{access_key}:{region}"
+    if _client is None or _client_key != cache_key:
         _client = boto3.client(
             "bedrock-runtime",
-            region_name=settings.aws_bedrock_region,
-            aws_access_key_id=settings.aws_access_key_id or None,
-            aws_secret_access_key=settings.aws_secret_access_key or None,
+            region_name=region,
+            aws_access_key_id=access_key or None,
+            aws_secret_access_key=secret_key or None,
         )
+        _client_key = cache_key
     return _client
 
 
@@ -38,13 +52,13 @@ class BedrockProvider:
 
     def __init__(self, model_id: str = _FALLBACK_MODEL_ID) -> None:
         self._model_id = model_id
-        self._client = _get_client()
 
     async def stream_chat(
         self,
         messages: list[dict],
         system_prompt: str,
     ) -> AsyncIterator[str]:
+        client = await _get_client()
         bedrock_messages = [
             {"role": m["role"], "content": [{"text": m["content"]}]}
             for m in messages
@@ -55,7 +69,7 @@ class BedrockProvider:
 
         def _sync_stream():
             try:
-                response = self._client.converse_stream(
+                response = client.converse_stream(
                     modelId=self._model_id,
                     system=[{"text": system_prompt}],
                     messages=bedrock_messages,
