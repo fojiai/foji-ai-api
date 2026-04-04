@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import chat, internal, widget
 from app.core.config import get_settings
+import app.models  # noqa: F401 — register all SQLAlchemy models so relationships resolve
 
 logging.basicConfig(
     level=logging.DEBUG if not get_settings().is_production else logging.INFO,
