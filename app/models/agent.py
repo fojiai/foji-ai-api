@@ -33,6 +33,14 @@ class Agent(Base):
     support_email: Mapped[str | None] = mapped_column("SupportEmail", String(200), nullable=True)
     sales_email: Mapped[str | None] = mapped_column("SalesEmail", String(200), nullable=True)
 
+    # Widget customization
+    welcome_message: Mapped[str | None] = mapped_column("WelcomeMessage", String(500), nullable=True)
+    conversation_starters: Mapped[str | None] = mapped_column("ConversationStarters", String(2000), nullable=True)
+    widget_primary_color: Mapped[str | None] = mapped_column("WidgetPrimaryColor", String(9), nullable=True)
+    widget_title: Mapped[str | None] = mapped_column("WidgetTitle", String(100), nullable=True)
+    widget_placeholder: Mapped[str | None] = mapped_column("WidgetPlaceholder", String(200), nullable=True)
+    widget_position: Mapped[str | None] = mapped_column("WidgetPosition", String(10), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime)
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime)
 
