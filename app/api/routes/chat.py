@@ -88,6 +88,12 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     return EventSourceResponse(
         _stream(providers, system_prompt, messages, session_id, req.message, agent.id, agent.company_id),
         media_type="text/event-stream",
+        ping=0,  # Disable sse_starlette's internal ping (we handle our own events)
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
