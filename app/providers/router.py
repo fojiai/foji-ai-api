@@ -1,9 +1,8 @@
 """
-Provider router — thin facade over ModelSelectorService.
+Provider router — facade over ModelSelectorService with automatic failover.
 
-Phase 1: random selection from all active AIModel rows in DB.
-Phase 2 (future): pass agent.preferred_model_id to select a specific model.
-  No changes needed here — just add the optional param to select().
+Shuffles all active models and tries each one in order. If one provider fails,
+the next one is tried automatically. Only fails if all providers error out.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,5 +13,9 @@ from app.services.model_selector import ModelSelectorService
 
 class ProviderRouter:
     async def select(self, db: AsyncSession) -> AIProvider:
-        """Return a fully initialised provider, model_id sourced from DB."""
+        """Return a single provider (legacy, no failover)."""
         return await ModelSelectorService(db).select()
+
+    async def select_all(self, db: AsyncSession) -> list[AIProvider]:
+        """Return all active providers in shuffled order for failover."""
+        return await ModelSelectorService(db).select_all()

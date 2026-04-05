@@ -42,10 +42,11 @@ class ModelSelectorService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
-    async def select(self) -> AIProvider:
+    async def select_all(self) -> list[AIProvider]:
         """
-        Load all active models from DB → pick one at random → instantiate provider.
-        Falls back to a single hardcoded default per provider if the table is empty.
+        Load all active models from DB → shuffle → return as a list of providers.
+        The caller can iterate through them for failover.
+        Falls back to hardcoded defaults if the table is empty.
         """
         result = await self._db.execute(
             select(AIModel).where(AIModel.is_active == True)  # noqa: E712
@@ -53,19 +54,35 @@ class ModelSelectorService:
         models: list[AIModel] = list(result.scalars().all())
 
         if models:
-            chosen: AIModel = random.choice(models)
-            provider_cls = _PROVIDER_MAP.get(chosen.provider)
-            if provider_cls is None:
-                raise ProviderException(f"Unknown provider in AIModels table: '{chosen.provider}'")
-            logger.debug("Selected model '%s' (%s) from DB", chosen.model_id, chosen.provider)
-            return provider_cls(model_id=chosen.model_id)
+            random.shuffle(models)
+            providers: list[AIProvider] = []
+            for m in models:
+                provider_cls = _PROVIDER_MAP.get(m.provider)
+                if provider_cls is None:
+                    logger.warning("Unknown provider in AIModels table: '%s' — skipping", m.provider)
+                    continue
+                providers.append(provider_cls(model_id=m.model_id))
+            if providers:
+                logger.debug(
+                    "Loaded %d active model(s): %s",
+                    len(providers),
+                    ", ".join(f"{p.provider_name}" for p in providers),
+                )
+                return providers
 
         # DB returned nothing — use fallback (log loudly so it's noticed)
         logger.warning(
             "AIModels table returned no active models — using hardcoded fallback. "
             "Seed the database to fix this."
         )
-        provider_name = random.choice(list(_FALLBACK_MODEL_IDS.keys()))
-        model_id = _FALLBACK_MODEL_IDS[provider_name]
-        provider_cls = _PROVIDER_MAP[provider_name]
-        return provider_cls(model_id=model_id)
+        fallback_keys = list(_FALLBACK_MODEL_IDS.keys())
+        random.shuffle(fallback_keys)
+        return [
+            _PROVIDER_MAP[name](model_id=_FALLBACK_MODEL_IDS[name])
+            for name in fallback_keys
+        ]
+
+    async def select(self) -> AIProvider:
+        """Select a single random provider (legacy convenience method)."""
+        providers = await self.select_all()
+        return providers[0]

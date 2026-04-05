@@ -82,17 +82,17 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     # 6. Prompt
     system_prompt, messages = _prompt_builder.build(agent, req.message, history, file_context)
 
-    # 7. DB-first provider selection — passes db so ModelSelectorService can query AIModels
-    provider = await _provider_router.select(db)
+    # 7. DB-first provider selection — all active models, shuffled for failover
+    providers = await _provider_router.select_all(db)
 
     return EventSourceResponse(
-        _stream(provider, system_prompt, messages, session_id, req.message, agent.id, agent.company_id),
+        _stream(providers, system_prompt, messages, session_id, req.message, agent.id, agent.company_id),
         media_type="text/event-stream",
     )
 
 
 async def _stream(
-    provider,
+    providers: list,
     system_prompt: str,
     messages: list[dict],
     session_id: str,
@@ -100,32 +100,58 @@ async def _stream(
     agent_id: int,
     company_id: int,
 ) -> AsyncIterator[str]:
-    collected: list[str] = []
-    try:
-        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
-            async for chunk in provider.stream_chat(messages, system_prompt):
-                collected.append(chunk)
-                yield json.dumps({"chunk": chunk})
+    last_error: Exception | None = None
 
-        full_response = "".join(collected)
-
-        # 8. Persist history — best-effort, never breaks the response
+    for i, provider in enumerate(providers):
+        collected: list[str] = []
         try:
-            await _history_svc.save(
-                session_id, user_message, full_response,
-                provider.provider_name, agent_id, company_id
+            logger.debug(
+                "Trying provider %d/%d: %s", i + 1, len(providers), provider.provider_name
             )
-        except Exception:
-            logger.exception("Failed to persist chat history — continuing")
+            async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+                async for chunk in provider.stream_chat(messages, system_prompt):
+                    collected.append(chunk)
+                    yield json.dumps({"chunk": chunk})
 
-        yield json.dumps({"done": True, "session_id": session_id})
+            full_response = "".join(collected)
 
-    except TimeoutError:
-        logger.warning("Stream timed out after %ds for session=%s", STREAM_TIMEOUT_SECONDS, session_id)
+            # 8. Persist history — best-effort, never breaks the response
+            try:
+                await _history_svc.save(
+                    session_id, user_message, full_response,
+                    provider.provider_name, agent_id, company_id
+                )
+            except Exception:
+                logger.exception("Failed to persist chat history — continuing")
+
+            yield json.dumps({"done": True, "session_id": session_id})
+            return  # success — stop trying providers
+
+        except TimeoutError:
+            logger.warning(
+                "Provider %s timed out after %ds — %s",
+                provider.provider_name, STREAM_TIMEOUT_SECONDS,
+                "trying next provider" if i < len(providers) - 1 else "no more providers",
+            )
+            last_error = TimeoutError(f"{provider.provider_name} timed out")
+        except ProviderException as exc:
+            logger.warning(
+                "Provider %s failed: %s — %s",
+                provider.provider_name, exc,
+                "trying next provider" if i < len(providers) - 1 else "no more providers",
+            )
+            last_error = exc
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error with provider %s — %s",
+                provider.provider_name,
+                "trying next provider" if i < len(providers) - 1 else "no more providers",
+            )
+            last_error = exc
+
+    # All providers failed
+    if isinstance(last_error, TimeoutError):
         yield json.dumps({"error": "Response timed out. Please try again.", "done": True})
-    except ProviderException as exc:
-        logger.error("Provider error during stream: %s", exc)
-        yield json.dumps({"error": "AI provider error. Please try again.", "done": True})
-    except Exception:
-        logger.exception("Unexpected error during stream")
-        yield json.dumps({"error": "An unexpected error occurred.", "done": True})
+    else:
+        logger.error("All %d provider(s) failed. Last error: %s", len(providers), last_error)
+        yield json.dumps({"error": f"AI provider error: {last_error}", "done": True})
