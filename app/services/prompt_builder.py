@@ -1,11 +1,25 @@
 from app.models.agent import Agent
 from app.services.chat_history import ChatMessage
 
-_CONTEXT_HEADER = """
-## Documentos de Referência / Reference Documents
+_LANGUAGE_MAP = {
+    "PtBr": "Brazilian Portuguese (pt-BR)",
+    "En": "English",
+    "Es": "Spanish",
+}
 
-The following content was extracted from documents uploaded to assist you.
-Use it to answer questions accurately. If the answer is not in the documents, say so clearly.
+_CONTEXT_HEADER = """
+## Reference Documents
+
+The following content was extracted from documents provided by the company.
+These documents are your PRIMARY source of truth — always prefer information
+from these documents over your general knowledge.
+
+IMPORTANT:
+- Answer questions using the document content whenever possible.
+- Quote or paraphrase specific sections to support your answers.
+- If the documents do not contain relevant information, say so clearly
+  and offer to help in another way.
+- Never fabricate information that is not in the documents or your training data.
 
 ---
 
@@ -18,6 +32,20 @@ _ESCALATION_HINT = (
     "or requests support/sales contact, provide the following information:\n"
 )
 
+_BASE_BEHAVIOR = """
+## Core Behavior Guidelines
+
+- Be helpful, accurate, and professional at all times.
+- Answer in the SAME language the user writes in, regardless of the agent's default language.
+- Keep responses clear and well-structured. Use short paragraphs and bullet points when listing multiple items.
+- When you are unsure or the information is not available, say so honestly instead of guessing.
+- Do not make up facts, URLs, phone numbers, prices, or any specific data.
+- If a question is ambiguous, ask a brief clarifying question before answering.
+- Stay on topic — politely redirect if the user asks about unrelated subjects outside your scope.
+- Use markdown formatting (bold, lists, headings) to make responses easy to read.
+- Be concise but thorough — provide complete answers without unnecessary filler.
+"""
+
 
 class PromptBuilder:
     """
@@ -25,6 +53,7 @@ class PromptBuilder:
 
     Final payload structure:
       system_prompt  = agent.system_prompt
+                       + core behavior guidelines
                        + agent.user_prompt (if set)
                        + escalation contacts (if any)
                        + file context (if any)
@@ -43,7 +72,11 @@ class PromptBuilder:
         return system_prompt, messages
 
     def _build_system_prompt(self, agent: Agent, file_context: str) -> str:
+        lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         parts = [agent.system_prompt]
+
+        parts.append(f"\nYour default language is {lang_label}.")
+        parts.append(_BASE_BEHAVIOR)
 
         if agent.user_prompt and agent.user_prompt.strip():
             parts.append(f"\n\n## Additional Instructions\n\n{agent.user_prompt.strip()}")
