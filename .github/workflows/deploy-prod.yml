@@ -95,9 +95,7 @@ jobs:
           max-task-count: 8
           auto-scaling-metric: AVERAGE_CPU
           auto-scaling-target-value: 70
-          environment-variables: |
-            AWS_SSM_PREFIX=/foji/prod/ai-api/
-            AWS_REGION=us-east-1
+          environment-variables: '[{"name":"AWS_SSM_PREFIX","value":"/foji/prod/ai-api/"},{"name":"AWS_REGION","value":"us-east-1"}]'
 
       - name: Summary
         run: |
