@@ -31,13 +31,15 @@ app = FastAPI(
 )
 
 # CORS — widget and management UI origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_cors_kwargs: dict = {
+    "allow_origins": settings.allowed_origins,
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+if settings.allowed_origin_regex:
+    _cors_kwargs["allow_origin_regex"] = settings.allowed_origin_regex
+app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
@@ -55,4 +57,9 @@ async def health():
 # ── Startup log ──────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
-    logger.info("foji-ai-api started | env=%s", settings.environment)
+    logger.info(
+        "foji-ai-api started | env=%s | cors_origins=%s | cors_regex=%s",
+        settings.environment,
+        settings.allowed_origins,
+        settings.allowed_origin_regex,
+    )

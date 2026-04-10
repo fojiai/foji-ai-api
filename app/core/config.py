@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.ssm import load_ssm_params
@@ -33,7 +34,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_dynamodb_table: str = "foji-chats-dev"
-    aws_s3_bucket: str = ""
+    aws_s3_bucket: str = Field(default="", validation_alias=AliasChoices("aws_s3_bucket", "aws_s3_bucket_name"))
 
     # Database pool
     db_pool_size: int = 10
@@ -52,7 +53,20 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        """Exact-match origins (entries without wildcards)."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip() and "*" not in o]
+
+    @property
+    def allowed_origin_regex(self) -> str | None:
+        """Regex for wildcard origins like https://*.fojiai.com."""
+        import re
+        patterns = []
+        for o in self.cors_origins.split(","):
+            o = o.strip()
+            if o and "*" in o:
+                escaped = re.escape(o).replace(r"\*", r"[a-zA-Z0-9\-]+")
+                patterns.append(escaped)
+        return "|".join(patterns) if patterns else None
 
 
 @lru_cache
