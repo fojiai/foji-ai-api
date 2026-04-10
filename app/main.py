@@ -8,10 +8,17 @@ from app.api.routes import chat, internal, widget
 from app.core.config import get_settings
 import app.models  # noqa: F401 — register all SQLAlchemy models so relationships resolve
 
+_settings = get_settings()
+_log_level = getattr(logging, _settings.log_level.upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.DEBUG if not get_settings().is_production else logging.INFO,
+    level=_log_level,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+# Quiet noisy third-party loggers regardless of app log level
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
