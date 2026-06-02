@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # Auth
     internal_api_key: str
 
+    # Google Calendar (encryption key must match FojiApi exactly)
+    google_calendar_encryption_key: str = ""
+
+    # FojiApi internal calls (for handoff notifications)
+    foji_api_base_url: str = "http://localhost:5000"
+    foji_api_internal_key: str = ""
+
     # AI Providers
     openai_api_key: str = ""
     gemini_api_key: str = ""

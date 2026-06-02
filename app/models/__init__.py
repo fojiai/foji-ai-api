@@ -7,3 +7,5 @@ from app.models.daily_stat import DailyStat  # noqa: F401
 from app.models.plan import Plan  # noqa: F401
 from app.models.subscription import Subscription  # noqa: F401
 from app.models.platform_setting import PlatformSetting  # noqa: F401
+from app.models.lead import Lead  # noqa: F401
+from app.models.calendar_connection import AgentCalendarConnection  # noqa: F401

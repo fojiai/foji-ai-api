@@ -6,15 +6,19 @@ Flow:
   2. Resolve/create session_id
   3. Load chat history (DynamoDB)
   4. Build file context
-  5. Build prompt payload
+  5a. Fetch Google Calendar slots (if connected)
+  5b. Build prompt payload (with calendar context if available)
   6. DB-first provider selection (ModelSelectorService → random AIModel row)
   7. Stream chunks as SSE
-  8. Persist history (best-effort)
+  8. Parse FOJI_SCHEDULE_SUGGESTION from AI response (if present)
+  9. Persist history (best-effort)
+  10. Emit calendar_suggestion SSE event (if suggestion found)
 """
 
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -30,6 +34,7 @@ from app.providers.router import ProviderRouter
 from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
+from app.services.google_calendar_service import GoogleCalendarService
 from app.services.prompt_builder import PromptBuilder
 from app.services.rate_limit_service import RateLimitExceededException, RateLimitService
 
@@ -41,6 +46,16 @@ _file_context_svc = FileContextService()
 _prompt_builder = PromptBuilder()
 _history_svc = ChatHistoryService()
 _rate_limit_svc = RateLimitService()
+_calendar_svc = GoogleCalendarService()
+
+# Regex to find and extract the FOJI_SCHEDULE_SUGGESTION JSON block at the end of AI output.
+# Matches an optional markdown code fence or bare JSON object.
+_SUGGESTION_RE = re.compile(
+    r'\n*```json\s*(\{"FOJI_SCHEDULE_SUGGESTION":.+?\})\s*```\s*$'
+    r'|'
+    r'\n*(\{"FOJI_SCHEDULE_SUGGESTION":.+?\})\s*$',
+    re.DOTALL,
+)
 
 
 class ChatRequest(BaseModel):
@@ -79,10 +94,26 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     # 5. File context
     file_context = await _file_context_svc.build(agent)
 
-    # 6. Prompt
-    system_prompt, messages = _prompt_builder.build(agent, req.message, history, file_context)
+    # 5a. Calendar slots — pre-fetch if agent has an active calendar connection
+    available_slots: list[dict] | None = None
+    if agent.calendar_connection and agent.calendar_connection.is_active:
+        try:
+            access_token = await _calendar_svc.get_access_token(
+                agent.id, agent.calendar_connection.encrypted_refresh_token
+            )
+            available_slots = await _calendar_svc.get_available_slots(access_token)
+        except Exception:
+            logger.warning(
+                "Calendar slot fetch failed for agent %d — continuing without calendar context",
+                agent.id,
+            )
 
-    # 7. DB-first provider selection — all active models, shuffled for failover
+    # 5b. Prompt (with calendar slots if available)
+    system_prompt, messages = _prompt_builder.build(
+        agent, req.message, history, file_context, available_slots
+    )
+
+    # 6. DB-first provider selection — all active models, shuffled for failover
     providers = await _provider_router.select_all(db)
 
     return EventSourceResponse(
@@ -95,6 +126,27 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
             "Connection": "keep-alive",
         },
     )
+
+
+def _extract_calendar_suggestion(full_response: str) -> tuple[str, dict | None]:
+    """
+    Finds and removes the FOJI_SCHEDULE_SUGGESTION JSON block from the end of the AI response.
+    Returns (clean_text, suggestion_dict | None).
+    """
+    match = _SUGGESTION_RE.search(full_response)
+    if not match:
+        return full_response, None
+
+    json_str = match.group(1) or match.group(2)
+    try:
+        parsed = json.loads(json_str)
+        suggestion = parsed.get("FOJI_SCHEDULE_SUGGESTION")
+        if not isinstance(suggestion, dict):
+            return full_response, None
+        clean_text = full_response[: match.start()].rstrip()
+        return clean_text, suggestion
+    except (json.JSONDecodeError, Exception):
+        return full_response, None
 
 
 async def _stream(
@@ -121,16 +173,30 @@ async def _stream(
 
             full_response = "".join(collected)
 
-            # 8. Persist history — best-effort, never breaks the response
+            # 8. Extract calendar suggestion before saving to history
+            clean_response, calendar_suggestion = _extract_calendar_suggestion(full_response)
+
+            # If the AI included a suggestion block, stream the corrected text chunk
+            # (the widget already received chunks including the raw JSON — we tell it to
+            # replace the last bubble via a "replace" event so the JSON is never shown)
+            if calendar_suggestion:
+                yield json.dumps({"replace_last": clean_response})
+
+            # 9. Persist history — best-effort, never breaks the response
             try:
                 await _history_svc.save(
-                    session_id, user_message, full_response,
+                    session_id, user_message, clean_response,
                     provider.provider_name, agent_id, company_id
                 )
             except Exception:
                 logger.exception("Failed to persist chat history — continuing")
 
             yield json.dumps({"done": True, "session_id": session_id})
+
+            # 10. Emit calendar suggestion after done so widget renders text first
+            if calendar_suggestion:
+                yield json.dumps({"calendar_suggestion": calendar_suggestion})
+
             return  # success — stop trying providers
 
         except TimeoutError:

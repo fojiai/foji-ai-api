@@ -20,6 +20,7 @@ class AgentService:
             .options(
                 selectinload(Agent.company),
                 selectinload(Agent.files),
+                selectinload(Agent.calendar_connection),
             )
         )
         agent = result.scalar_one_or_none()
@@ -56,4 +57,11 @@ class AgentService:
             "widget_title": agent.widget_title,
             "widget_placeholder": agent.widget_placeholder,
             "widget_position": agent.widget_position,
+            "lead_capture_enabled": agent.lead_capture_enabled,
+            "lead_capture_prompt": agent.lead_capture_prompt,
+            "handoff_enabled": agent.handoff_enabled,
+            "handoff_message": agent.handoff_message,
+            "calendar_enabled": (
+                agent.calendar_connection is not None and agent.calendar_connection.is_active
+            ),
         }

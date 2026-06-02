@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import chat, internal, widget
+from app.api.routes import calendar, chat, internal, widget
 from app.core.config import get_settings
 import app.models  # noqa: F401 — register all SQLAlchemy models so relationships resolve
 
@@ -46,6 +46,7 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
 app.include_router(widget.router, prefix="/api/v1", tags=["Widget"])
 app.include_router(internal.router, prefix="/api/v1", tags=["Internal"])
+app.include_router(calendar.router, prefix="/api/v1", tags=["Calendar"])
 
 
 # ── Health ───────────────────────────────────────────────────────────────────

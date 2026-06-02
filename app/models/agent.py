@@ -33,6 +33,18 @@ class Agent(Base):
     support_email: Mapped[str | None] = mapped_column("SupportEmail", String(200), nullable=True)
     sales_email: Mapped[str | None] = mapped_column("SalesEmail", String(200), nullable=True)
 
+    # Response style — controls tone injected into system prompt
+    response_style: Mapped[str | None] = mapped_column("ResponseStyle", String(20), nullable=True)
+
+    # Lead capture
+    lead_capture_enabled: Mapped[bool] = mapped_column("LeadCaptureEnabled", Boolean, default=False)
+    lead_capture_prompt: Mapped[str | None] = mapped_column("LeadCapturePrompt", String(500), nullable=True)
+
+    # Human handoff
+    handoff_enabled: Mapped[bool] = mapped_column("HandoffEnabled", Boolean, default=False)
+    handoff_notify_email: Mapped[str | None] = mapped_column("HandoffNotifyEmail", String(254), nullable=True)
+    handoff_message: Mapped[str | None] = mapped_column("HandoffMessage", String(500), nullable=True)
+
     # Widget customization
     welcome_message: Mapped[str | None] = mapped_column("WelcomeMessage", String(500), nullable=True)
     conversation_starters: Mapped[str | None] = mapped_column("ConversationStarters", String(2000), nullable=True)
@@ -47,3 +59,10 @@ class Agent(Base):
     # Relationships
     company: Mapped["Company"] = relationship("Company", back_populates="agents", lazy="select")
     files: Mapped[list["AgentFile"]] = relationship("AgentFile", back_populates="agent", lazy="select")
+    calendar_connection: Mapped["AgentCalendarConnection | None"] = relationship(
+        "AgentCalendarConnection",
+        primaryjoin="and_(foreign(AgentCalendarConnection.agent_id) == Agent.id, AgentCalendarConnection.is_active == True)",
+        uselist=False,
+        lazy="select",
+        viewonly=True,
+    )
