@@ -8,7 +8,6 @@ POST /api/v1/widget/handoff      Request human handoff — notifies the company 
 """
 
 import logging
-from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -18,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.exceptions import AgentInactiveException, AgentNotFoundException
-from app.models.lead import Lead
 from app.services.agent_service import AgentService
 
 logger = logging.getLogger(__name__)
@@ -100,23 +98,32 @@ async def capture_lead(
     if not any([body.name, body.email, body.phone]):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one of name, email, or phone is required.")
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    lead = Lead(
-        agent_id=agent.id,
-        company_id=agent.company_id,
-        name=body.name or None,
-        email=body.email or None,
-        phone=body.phone or None,
-        session_id=body.session_id,
-        source=body.source,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(lead)
-    await db.commit()
-    await db.refresh(lead)
+    # Write the lead + dedup/upsert the CRM contact via FojiApi (sole owner of the Postgres write).
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{settings.foji_api_base_url}/api/leads/internal",
+                json={
+                    "agentId": agent.id,
+                    "sessionId": body.session_id,
+                    "name": body.name or None,
+                    "email": body.email or None,
+                    "phone": body.phone or None,
+                    "source": body.source,
+                },
+                headers={"X-Internal-Key": settings.foji_api_internal_key},
+            )
+    except Exception as exc:
+        logger.warning("Failed to capture lead via FojiApi for agent %d: %s", agent.id, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Lead capture is temporarily unavailable.")
 
-    return {"id": lead.id, "session_id": lead.session_id}
+    if not resp.is_success:
+        logger.warning("FojiApi lead capture returned %d for agent %d", resp.status_code, agent.id)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Lead capture failed.")
+
+    data = resp.json()
+    return {"id": data.get("id"), "session_id": data.get("session_id", body.session_id)}
 
 
 class HandoffRequest(BaseModel):
