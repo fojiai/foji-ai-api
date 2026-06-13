@@ -8,6 +8,7 @@ This service never writes to the Foji PostgreSQL database.
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,6 +17,17 @@ import httpx
 from app.core.encryption import decrypt_refresh_token
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_meet_link(event: dict) -> str | None:
+    """Pull the Google Meet video URL out of a created calendar event."""
+    link = event.get("hangoutLink")
+    if link:
+        return link
+    for entry in event.get("conferenceData", {}).get("entryPoints", []):
+        if entry.get("entryPointType") == "video" and entry.get("uri"):
+            return entry["uri"]
+    return None
 
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
@@ -100,7 +112,10 @@ class GoogleCalendarService:
         description: str = "",
         calendar_id: str = "primary",
     ) -> dict:
-        """Create a calendar event with an attendee. Google automatically sends the invite email."""
+        """
+        Create a calendar event with an attendee and an auto-generated Google Meet link.
+        Google automatically sends the invite email (with the Meet link) to the attendee.
+        """
         event_body = {
             "summary": summary,
             "description": description,
@@ -108,13 +123,19 @@ class GoogleCalendarService:
             "end": {"dateTime": end_iso},
             "attendees": [{"email": attendee_email, "displayName": attendee_name}],
             "reminders": {"useDefault": True},
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            },
         }
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
                 json=event_body,
-                params={"sendUpdates": "all"},
+                params={"sendUpdates": "all", "conferenceDataVersion": 1},
                 headers={"Authorization": f"Bearer {access_token}"},
             )
 
@@ -122,7 +143,11 @@ class GoogleCalendarService:
             raise RuntimeError(f"Failed to create Google Calendar event: {resp.text}")
 
         data = resp.json()
-        return {"id": data["id"], "htmlLink": data.get("htmlLink", "")}
+        return {
+            "id": data["id"],
+            "htmlLink": data.get("htmlLink", ""),
+            "meetLink": _extract_meet_link(data),
+        }
 
     async def is_slot_free(
         self,

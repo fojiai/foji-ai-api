@@ -7,10 +7,12 @@ Auth: X-Agent-Token (same as /chat). No Foji DB writes — event lives in Google
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.exceptions import AgentInactiveException, AgentNotFoundException
 from app.services.agent_service import AgentService
@@ -41,6 +43,7 @@ class BookingRequest(BaseModel):
 class BookingResponse(BaseModel):
     event_id: str
     html_link: str
+    meet_link: str | None = None
     message: str
 
 
@@ -113,8 +116,32 @@ async def book_appointment(
         agent.id, req.attendee_email, req.slot_start, event["id"],
     )
 
+    # 6. Record the meeting in the CRM via FojiApi (links to contact, creates follow-up task).
+    #    Best-effort — the booking already succeeded, so never fail the request on this.
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{settings.foji_api_base_url}/api/meetings/internal",
+                json={
+                    "agentId": agent.id,
+                    "googleEventId": event["id"],
+                    "meetLink": event.get("meetLink"),
+                    "htmlLink": event.get("htmlLink"),
+                    "title": f"Appointment with {req.attendee_name}",
+                    "startsAt": req.slot_start,
+                    "endsAt": req.slot_end,
+                    "attendeeEmail": req.attendee_email,
+                    "attendeeName": req.attendee_name,
+                },
+                headers={"X-Internal-Key": settings.foji_api_internal_key},
+            )
+    except Exception as exc:
+        logger.warning("Failed to record meeting in CRM for agent %d: %s", agent.id, exc)
+
     return BookingResponse(
         event_id=event["id"],
         html_link=event["htmlLink"],
+        meet_link=event.get("meetLink"),
         message="Appointment booked! You will receive a Google Calendar invite at your email.",
     )
