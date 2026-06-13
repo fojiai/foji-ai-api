@@ -121,3 +121,72 @@ async def whatsapp_chat(
         logger.warning("Failed to save WhatsApp chat history for session=%s", body.session_id)
 
     return WhatsAppChatResponse(reply=reply, session_id=body.session_id)
+
+
+# ── CRM email drafting ─────────────────────────────────────────────────────────
+
+class DraftEmailRequest(BaseModel):
+    agent_token: str
+    contact_name: str | None = None
+    goal: str
+    tone: str | None = None
+
+
+class DraftEmailResponse(BaseModel):
+    subject: str
+    body: str
+
+
+def _split_subject(text: str) -> tuple[str, str]:
+    """Parse a 'Subject: ...' first line from the model output; return (subject, body)."""
+    stripped = text.strip()
+    lines = stripped.split("\n", 1)
+    first = lines[0].strip()
+    if first.lower().startswith("subject:"):
+        subject = first[len("subject:"):].strip()
+        body = lines[1].strip() if len(lines) > 1 else ""
+        return subject or "Proposal", body or stripped
+    return "Proposal", stripped
+
+
+@router.post(
+    "/crm/draft-email",
+    response_model=DraftEmailResponse,
+    dependencies=[Depends(verify_internal_key)],
+    summary="Draft a CRM proposal / follow-up email",
+    description="Generates a subject + body for a sales email. Called by FojiApi on behalf of the dashboard.",
+)
+async def draft_email(
+    body: DraftEmailRequest,
+    db: AsyncSession = Depends(get_db),
+) -> DraftEmailResponse:
+    # Validate the agent token (scopes the request to a real company/agent).
+    agent_svc = AgentService(db)
+    await agent_svc.get_by_token(body.agent_token)
+
+    provider = await ProviderRouter().select(db)
+
+    system_prompt = (
+        "You write concise, warm, professional sales and follow-up emails for a business. "
+        "Output ONLY the email, nothing else. The first line MUST be exactly 'Subject: <subject line>'. "
+        "Then one blank line, then the email body in plain text (no markdown, no placeholders like [Name]). "
+        "Keep it under 180 words. Use a generic sign-off; do not invent a sender name or company. "
+        "Write in the same language as the goal described by the user."
+    )
+    user = f"Recipient name: {body.contact_name or 'the customer'}\nGoal of the email: {body.goal}"
+    if body.tone:
+        user += f"\nDesired tone: {body.tone}"
+
+    chunks: list[str] = []
+    async for chunk in provider.stream_chat([{"role": "user", "content": user}], system_prompt):
+        chunks.append(chunk)
+    text = "".join(chunks).strip()
+
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Provider returned an empty draft",
+        )
+
+    subject, email_body = _split_subject(text)
+    return DraftEmailResponse(subject=subject, body=email_body)
