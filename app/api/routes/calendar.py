@@ -17,11 +17,13 @@ from app.core.database import get_db
 from app.core.exceptions import AgentInactiveException, AgentNotFoundException
 from app.services.agent_service import AgentService
 from app.services.google_calendar_service import GoogleCalendarService
+from app.services.rate_limit_service import RateLimitService, SubscriptionInactiveException
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _calendar_svc = GoogleCalendarService()
+_rate_limit_svc = RateLimitService()
 
 
 class BookingRequest(BaseModel):
@@ -60,6 +62,19 @@ async def book_appointment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
     except AgentInactiveException:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent is inactive.")
+
+    # 1b. Verify the company is on a plan that includes scheduling. A downgrade or
+    # cancellation never clears AgentCalendarConnection.IsActive, so without this
+    # bookings kept succeeding indefinitely on plans without the feature.
+    try:
+        plan = await _rate_limit_svc.require_serving_plan(db, agent.company_id)
+    except SubscriptionInactiveException as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
+    if not plan.has_google_calendar:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="The current plan does not include appointment scheduling.",
+        )
 
     # 2. Verify calendar is connected
     if not agent.calendar_connection or not agent.calendar_connection.is_active:

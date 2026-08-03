@@ -19,6 +19,8 @@ class Plan(Base):
     max_agents: Mapped[int] = mapped_column("MaxAgents", Integer)
     has_whats_app: Mapped[bool] = mapped_column("HasWhatsApp", Boolean, default=False)
     has_escalation_contacts: Mapped[bool] = mapped_column("HasEscalationContacts", Boolean, default=False)
+    has_google_calendar: Mapped[bool] = mapped_column("HasGoogleCalendar", Boolean, default=False)
+    has_crm: Mapped[bool] = mapped_column("HasCrm", Boolean, default=False)
     max_conversations_per_month: Mapped[int] = mapped_column("MaxConversationsPerMonth", Integer, default=0)
     max_messages_per_month: Mapped[int] = mapped_column("MaxMessagesPerMonth", Integer, default=0)
     is_active: Mapped[bool] = mapped_column("IsActive", Boolean, default=True)

@@ -80,12 +80,19 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent is inactive.")
 
     # 2. Resolve or create session
-    is_new_session = req.session_id is None
     session_id = req.session_id or _history_svc.new_session_id()
 
-    # 3. Check monthly rate limits (soft-enforce via DailyStats, up to 24h lag)
+    # 3. Load history first — it is what tells us whether this is really a new
+    # conversation. Deriving that from `req.session_id is None` trusted the
+    # client: the widget is public and the agent token sits in the page, so
+    # sending a fresh random session_id on every request made is_new_session
+    # permanently False and skipped the conversation cap entirely.
+    history = await _history_svc.load(session_id)
+    is_new_session = not history
+
+    # 4. Check monthly rate limits (soft-enforce via DailyStats, up to 24h lag)
     try:
-        await _rate_limit_svc.check(db, agent.company_id, is_new_session)
+        plan = await _rate_limit_svc.check(db, agent.company_id, is_new_session)
     except RateLimitExceededException as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -97,15 +104,15 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
             detail=str(exc),
         )
 
-    # 4. Load history
-    history = await _history_svc.load(session_id)
-
     # 5. File context
     file_context = await _file_context_svc.build(agent)
 
     # 5a. Calendar slots — pre-fetch if agent has an active calendar connection
+    # Gated on the plan as well as the connection: a downgrade (or cancellation)
+    # never clears AgentCalendarConnection.IsActive, so checking only the
+    # connection kept scheduling alive on plans that don't include it.
     available_slots: list[dict] | None = None
-    if agent.calendar_connection and agent.calendar_connection.is_active:
+    if plan.has_google_calendar and agent.calendar_connection and agent.calendar_connection.is_active:
         try:
             access_token = await _calendar_svc.get_access_token(
                 agent.id, agent.calendar_connection.encrypted_refresh_token

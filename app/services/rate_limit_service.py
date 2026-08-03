@@ -57,9 +57,13 @@ class SubscriptionInactiveException(Exception):
 
 
 class RateLimitService:
-    async def check(self, db: AsyncSession, company_id: int, is_new_session: bool) -> None:
+    async def check(self, db: AsyncSession, company_id: int, is_new_session: bool) -> Plan:
         """
-        Validates that the company has not exceeded its monthly limits.
+        Validates that the company has an active plan and is within its limits.
+
+        Returns the validated plan so callers can gate plan features without a
+        second query. Raises SubscriptionInactiveException or
+        RateLimitExceededException.
 
         Args:
             db: async DB session
@@ -73,7 +77,7 @@ class RateLimitService:
 
         # 0 = unlimited
         if max_conv == 0 and max_msg == 0:
-            return
+            return plan
 
         sessions_used, messages_used = await self._monthly_usage(db, company_id)
 
@@ -90,6 +94,8 @@ class RateLimitService:
                 company_id, messages_used, max_msg,
             )
             raise RateLimitExceededException("messages", messages_used, max_msg)
+
+        return plan
 
     async def require_serving_plan(self, db: AsyncSession, company_id: int) -> Plan:
         """
