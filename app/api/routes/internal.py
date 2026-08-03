@@ -12,6 +12,7 @@ Current endpoints:
 import logging
 import secrets
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,11 +49,43 @@ class WhatsAppChatRequest(BaseModel):
     agent_token: str
     session_id: str  # typically "wa:<phone_number>" — namespaced by caller
     message: str
+    sender_phone: str | None = None  # the wa_id, used to create the CRM contact
+    profile_name: str | None = None  # the sender's WhatsApp display name
 
 
 class WhatsAppChatResponse(BaseModel):
     reply: str
     session_id: str
+
+
+async def _capture_whatsapp_lead(
+    agent_id: int, session_id: str, phone: str, profile_name: str | None
+) -> None:
+    """
+    Register a WhatsApp sender as a lead in FojiApi, which dedupes it into a
+    Contact by normalized phone. Never raises — the chat reply matters more.
+    """
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{settings.foji_api_base_url}/api/leads/internal",
+                json={
+                    "agentId": agent_id,
+                    "sessionId": session_id,
+                    "name": profile_name or None,
+                    "email": None,
+                    "phone": phone,
+                    "source": "whatsapp",
+                },
+                headers={"X-Internal-Key": settings.foji_api_internal_key},
+            )
+        if not resp.is_success:
+            logger.warning(
+                "WhatsApp lead capture returned %d for agent %d", resp.status_code, agent_id
+            )
+    except Exception as exc:
+        logger.warning("WhatsApp lead capture failed for agent %d: %s", agent_id, exc)
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -98,6 +131,12 @@ async def whatsapp_chat(
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
     except RateLimitExceededException as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
+
+    # 2c. First message of a conversation → capture it as a lead so the sender
+    # becomes a deduped CRM contact and the conversation shows up on their
+    # timeline. Best-effort: a CRM hiccup must never cost the user a reply.
+    if not history and body.sender_phone:
+        await _capture_whatsapp_lead(agent.id, body.session_id, body.sender_phone, body.profile_name)
 
     # 3. Build file context
     file_ctx_svc = FileContextService()
