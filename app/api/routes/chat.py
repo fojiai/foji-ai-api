@@ -36,7 +36,11 @@ from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.google_calendar_service import GoogleCalendarService
 from app.services.prompt_builder import PromptBuilder
-from app.services.rate_limit_service import RateLimitExceededException, RateLimitService
+from app.services.rate_limit_service import (
+    RateLimitExceededException,
+    RateLimitService,
+    SubscriptionInactiveException,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -85,6 +89,11 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     except RateLimitExceededException as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        )
+    except SubscriptionInactiveException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=str(exc),
         )
 

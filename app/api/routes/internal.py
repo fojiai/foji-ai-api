@@ -22,6 +22,11 @@ from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.prompt_builder import PromptBuilder
+from app.services.rate_limit_service import (
+    RateLimitExceededException,
+    RateLimitService,
+    SubscriptionInactiveException,
+)
 from app.providers.router import ProviderRouter
 
 logger = logging.getLogger(__name__)
@@ -71,9 +76,28 @@ async def whatsapp_chat(
     agent_svc = AgentService(db)
     agent = await agent_svc.get_by_token(body.agent_token)
 
-    # 2. Load chat history
+    # 2. Load chat history (also tells us whether this is a new conversation)
     history_svc = ChatHistoryService()
     history = await history_svc.load(body.session_id)
+
+    # 2b. Enforce subscription + monthly limits on WhatsApp too, before any
+    # expensive work. This path used to skip RateLimitService entirely, so
+    # WhatsApp traffic was unmetered and a company that downgraded off a WhatsApp
+    # plan kept the channel working (Agent.WhatsAppEnabled stays set on downgrade
+    # and nothing re-checked the plan).
+    rate_limit_svc = RateLimitService()
+    try:
+        plan = await rate_limit_svc.require_serving_plan(db, agent.company_id)
+        if not plan.has_whats_app:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="The current plan does not include WhatsApp.",
+            )
+        await rate_limit_svc.check(db, agent.company_id, is_new_session=not history)
+    except SubscriptionInactiveException as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
+    except RateLimitExceededException as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
 
     # 3. Build file context
     file_ctx_svc = FileContextService()

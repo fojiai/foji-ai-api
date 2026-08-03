@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 # Subscription statuses that have an active plan
 _ACTIVE_STATUSES = {"Active", "Trialing"}
 
+# PastDue is Stripe's dunning window — the card failed but retries are still
+# pending. Keep serving (a transient payment glitch shouldn't instantly break a
+# paying customer's widget) but still enforce that plan's limits.
+_GRACE_STATUSES = {"PastDue"}
+
+# Anything else (Canceled, Unpaid, or no subscription row at all) is not served.
+_SERVING_STATUSES = _ACTIVE_STATUSES | _GRACE_STATUSES
+
 
 class RateLimitExceededException(Exception):
     """Raised when a company has exceeded its monthly usage cap."""
@@ -38,6 +46,14 @@ class RateLimitExceededException(Exception):
         self.used = used
         self.limit = limit
         super().__init__(f"Monthly {resource} limit reached ({used}/{limit}).")
+
+
+class SubscriptionInactiveException(Exception):
+    """Raised when a company has no subscription entitled to be served."""
+
+    def __init__(self, company_id: int) -> None:
+        self.company_id = company_id
+        super().__init__("No active subscription for this account.")
 
 
 class RateLimitService:
@@ -50,11 +66,7 @@ class RateLimitService:
             company_id: company to check
             is_new_session: True if this is the first message of a new conversation
         """
-        plan = await self._get_active_plan(db, company_id)
-        if plan is None:
-            # No active subscription — let the chat proceed; billing enforcement
-            # is handled by FojiApi at agent creation time, not here.
-            return
+        plan = await self.require_serving_plan(db, company_id)
 
         max_conv = plan.max_conversations_per_month
         max_msg = plan.max_messages_per_month
@@ -79,13 +91,29 @@ class RateLimitService:
             )
             raise RateLimitExceededException("messages", messages_used, max_msg)
 
+    async def require_serving_plan(self, db: AsyncSession, company_id: int) -> Plan:
+        """
+        Returns the plan the company is entitled to be served under, or raises.
+
+        Fails closed: nothing else revokes serving capacity when a subscription is
+        canceled or a trial expires — those paths only flip Subscription.Status —
+        so treating "no plan" as "allow" handed every churned account unlimited
+        free inference indefinitely.
+        """
+        plan = await self._get_active_plan(db, company_id)
+        if plan is None:
+            logger.warning(
+                "Serving denied: company_id=%s has no active subscription", company_id
+            )
+            raise SubscriptionInactiveException(company_id)
+        return plan
+
     async def _get_active_plan(self, db: AsyncSession, company_id: int) -> Plan | None:
-        today = date.today()
         result = await db.execute(
             select(Subscription)
             .where(
                 Subscription.company_id == company_id,
-                Subscription.status.in_(_ACTIVE_STATUSES),
+                Subscription.status.in_(_SERVING_STATUSES),
             )
             .order_by(Subscription.created_at.desc())
             .limit(1)
