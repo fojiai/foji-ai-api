@@ -20,6 +20,7 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.daily_stat import DailyStat
 from app.models.plan import Plan
 from app.models.subscription import Subscription
@@ -56,6 +57,23 @@ class SubscriptionInactiveException(Exception):
         super().__init__("No active subscription for this account.")
 
 
+def _unlocked_plan() -> Plan:
+    """In-memory plan with every feature on and no caps. Dev mode only."""
+    plan = Plan()
+    plan.id = 0
+    plan.name = "Development"
+    plan.slug = "development"
+    plan.max_agents = 999
+    plan.has_whats_app = True
+    plan.has_escalation_contacts = True
+    plan.has_google_calendar = True
+    plan.has_crm = True
+    plan.max_conversations_per_month = 0  # 0 = unlimited
+    plan.max_messages_per_month = 0
+    plan.is_active = True
+    return plan
+
+
 class RateLimitService:
     async def check(self, db: AsyncSession, company_id: int, is_new_session: bool) -> Plan:
         """
@@ -71,6 +89,9 @@ class RateLimitService:
             is_new_session: True if this is the first message of a new conversation
         """
         plan = await self.require_serving_plan(db, company_id)
+
+        if not get_settings().billing_enforcement_enabled:
+            return plan
 
         max_conv = plan.max_conversations_per_month
         max_msg = plan.max_messages_per_month
@@ -106,6 +127,16 @@ class RateLimitService:
         so treating "no plan" as "allow" handed every churned account unlimited
         free inference indefinitely.
         """
+        # Dev mode short-circuits before the lookup: callers gate features off the
+        # returned plan (has_whats_app, has_google_calendar), so returning the real
+        # plan here would still block those even with enforcement disabled.
+        if not get_settings().billing_enforcement_enabled:
+            logger.info(
+                "Billing enforcement disabled — serving company_id=%s on an unlocked plan",
+                company_id,
+            )
+            return _unlocked_plan()
+
         plan = await self._get_active_plan(db, company_id)
         if plan is None:
             logger.warning(

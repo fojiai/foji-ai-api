@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Auth
     internal_api_key: str
 
+    # Dev switch: when false, subscription and usage limits are not enforced.
+    # Defaults to true — production must opt out explicitly, never by omission.
+    billing_enforcement_enabled: bool = True
+
     # Google Calendar (encryption key must match FojiApi exactly)
     google_calendar_encryption_key: str = ""
 
