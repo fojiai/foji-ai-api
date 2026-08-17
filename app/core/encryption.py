@@ -2,7 +2,8 @@
 AES-256-GCM decryption for Google OAuth refresh tokens.
 Tokens are encrypted by FojiApi's EncryptionService — format must match exactly:
   base64(12-byte IV) : base64(ciphertext) : base64(16-byte auth tag)
-Key source: GOOGLE_CALENDAR_ENCRYPTION_KEY env var (base64, 32 bytes).
+Key source: ENCRYPTION_KEY env var (base64, 32 bytes), falling back to the
+legacy GOOGLE_CALENDAR_ENCRYPTION_KEY. Must match FojiApi and foji-worker.
 """
 
 import base64
@@ -12,12 +13,17 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def _get_key() -> bytes:
-    key_b64 = os.environ.get("GOOGLE_CALENDAR_ENCRYPTION_KEY", "")
+    key_b64 = os.environ.get("ENCRYPTION_KEY", "") or os.environ.get(
+        "GOOGLE_CALENDAR_ENCRYPTION_KEY", ""
+    )
     if not key_b64:
-        raise RuntimeError("GOOGLE_CALENDAR_ENCRYPTION_KEY is not set.")
+        raise RuntimeError(
+            "No encryption key set. Set ENCRYPTION_KEY (or the legacy "
+            "GOOGLE_CALENDAR_ENCRYPTION_KEY) to a base64-encoded 32-byte value."
+        )
     key = base64.b64decode(key_b64)
     if len(key) != 32:
-        raise RuntimeError("GOOGLE_CALENDAR_ENCRYPTION_KEY must be exactly 32 bytes (base64-encoded).")
+        raise RuntimeError("The encryption key must be exactly 32 bytes (base64-encoded).")
     return key
 
 
