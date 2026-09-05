@@ -253,3 +253,22 @@ async def draft_email(
 
     subject, email_body = _split_subject(text)
     return DraftEmailResponse(subject=subject, body=email_body)
+
+
+class PurgeChatHistoryRequest(BaseModel):
+    company_id: int
+
+
+@router.post(
+    "/chat-history/purge",
+    dependencies=[Depends(verify_internal_key)],
+    summary="Delete all chat history for a company",
+    description=(
+        "Called by FojiApi when a company is deleted, so its WhatsApp and widget "
+        "conversation history is erased immediately instead of waiting out the "
+        "90-day TTL. Returns how many messages were deleted."
+    ),
+)
+async def purge_chat_history(body: PurgeChatHistoryRequest) -> dict:
+    deleted = await ChatHistoryService().purge_company(body.company_id)
+    return {"deleted": deleted}

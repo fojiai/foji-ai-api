@@ -20,7 +20,7 @@ from datetime import date
 from decimal import Decimal
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 
 from app.core.config import get_settings
 
@@ -56,6 +56,42 @@ class ChatHistoryService:
     @staticmethod
     def new_session_id() -> str:
         return str(uuid.uuid4())
+
+    async def purge_company(self, company_id: int) -> int:
+        """Delete every chat message belonging to a company.
+
+        Used when a company is deleted, so its conversation history is actually
+        gone rather than waiting out the 90-day TTL. There is no index on
+        company_id, so this scans the table and batch-deletes the matches by
+        their (session_id, timestamp) keys. A scan is fine here: deletion is a
+        rare, one-off operation, not a hot path.
+        """
+        return await asyncio.to_thread(self._purge_company_sync, company_id)
+
+    def _purge_company_sync(self, company_id: int) -> int:
+        deleted = 0
+        scan_kwargs = {
+            "FilterExpression": Attr("company_id").eq(company_id),
+            # Only the key attributes are needed to delete.
+            "ProjectionExpression": "session_id, #ts",
+            "ExpressionAttributeNames": {"#ts": "timestamp"},
+        }
+        while True:
+            response = self._table.scan(**scan_kwargs)
+            items = response.get("Items", [])
+            if items:
+                with self._table.batch_writer() as batch:
+                    for item in items:
+                        batch.delete_item(
+                            Key={"session_id": item["session_id"], "timestamp": item["timestamp"]}
+                        )
+                deleted += len(items)
+            last = response.get("LastEvaluatedKey")
+            if not last:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last
+        logger.info("Purged %d chat messages for company %d", deleted, company_id)
+        return deleted
 
     async def load(self, session_id: str) -> list[ChatMessage]:
         """Return the last N messages for this session, oldest first."""
