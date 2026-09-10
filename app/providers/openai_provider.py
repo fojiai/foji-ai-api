@@ -45,8 +45,12 @@ class OpenAIProvider:
                 model=self._model_id,
                 messages=full_messages,
                 stream=True,
-                temperature=0.7,
-                max_tokens=2048,
+                # The gpt-5 family requires max_completion_tokens (max_tokens is
+                # rejected) and only accepts the default temperature, so we send
+                # neither the old parameter name nor an explicit temperature.
+                # max_completion_tokens is also accepted by the older 4o models,
+                # so this stays correct if model_id is pointed back at one.
+                max_completion_tokens=2048,
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta.content
