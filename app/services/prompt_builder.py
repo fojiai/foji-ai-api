@@ -59,6 +59,20 @@ helpful human who actually works here — not a manual, not a brochure, not a bo
   bring it back.
 """
 
+_WHATSAPP_CHANNEL = """
+## You're on WhatsApp
+
+This reply is going into WhatsApp, so write like a person texting — not like a web page.
+
+- No markdown. WhatsApp does not render it. For emphasis use WhatsApp's own syntax:
+  *bold* with single asterisks, _italic_ with underscores. Never use #, ##, headings,
+  **double asterisks**, or [text](links).
+- Even shorter than usual — one or two short messages' worth. Long blocks feel wrong here.
+- Skip bullet lists. If you truly must list a few things, put each on its own line with a
+  simple dash.
+- Share a link as a plain URL on its own line; WhatsApp makes it tappable on its own.
+"""
+
 _STYLE_OVERRIDES: dict[str, str] = {
     "Friendly": """
 ## Response Style: Friendly
@@ -141,13 +155,18 @@ class PromptBuilder:
         history: list[ChatMessage],
         file_context: str,
         available_slots: list[dict] | None = None,
+        channel: str = "widget",
     ) -> tuple[str, list[dict]]:
-        system_prompt = self._build_system_prompt(agent, file_context, available_slots)
+        system_prompt = self._build_system_prompt(agent, file_context, available_slots, channel)
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
 
     def _build_system_prompt(
-        self, agent: Agent, file_context: str, available_slots: list[dict] | None
+        self,
+        agent: Agent,
+        file_context: str,
+        available_slots: list[dict] | None,
+        channel: str = "widget",
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         parts = [agent.system_prompt]
@@ -159,6 +178,12 @@ class PromptBuilder:
         style_block = _STYLE_OVERRIDES.get(agent.response_style or "", "")
         if style_block:
             parts.append(style_block)
+
+        # WhatsApp renders nothing like the web widget — no markdown, texting-length
+        # replies. This comes after the style block so it wins on formatting even
+        # when the business picked a style that would otherwise add headings/lists.
+        if channel == "whatsapp":
+            parts.append(_WHATSAPP_CHANNEL)
 
         if agent.user_prompt and agent.user_prompt.strip():
             parts.append(f"\n\n## Additional Instructions\n\n{agent.user_prompt.strip()}")
