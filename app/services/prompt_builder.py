@@ -8,18 +8,22 @@ _LANGUAGE_MAP = {
 }
 
 _CONTEXT_HEADER = """
-## Reference Documents
+## What you know
 
-The following content was extracted from documents provided by the company.
-These documents are your PRIMARY source of truth — always prefer information
-from these documents over your general knowledge.
+The information below was provided by the company. It's your source of truth —
+prefer it over your general knowledge, and never contradict it.
 
 IMPORTANT:
-- Answer questions using the document content whenever possible.
-- Quote or paraphrase specific sections to support your answers.
-- If the documents do not contain relevant information, say so clearly
-  and offer to help in another way.
-- Never fabricate information that is not in the documents or your training data.
+- Answer from this information whenever it applies to the question.
+- Speak as the company, from your own knowledge. NEVER tell the customer where
+  the answer came from. Do not say "according to the documents", "as mentioned
+  in my documents", "based on the information provided", "de acordo com os
+  documentos", "conforme meus documentos", "com base nas informações
+  fornecidas", or anything like it. The customer doesn't know these notes exist
+  and shouldn't — just give the answer directly, as if you simply know it.
+- If this information doesn't cover the question, say you don't have that detail
+  and offer a next step — never guess or invent facts, prices, links, or phone
+  numbers.
 
 ---
 
@@ -174,8 +178,10 @@ class PromptBuilder:
         parts.append(f"\nYour default language is {lang_label}.")
         parts.append(_BASE_BEHAVIOR)
 
-        # Inject response style override when configured
-        style_block = _STYLE_OVERRIDES.get(agent.response_style or "", "")
+        # Inject response style override. WhatsApp is a terse, texting medium, so
+        # it always leans Concise regardless of the style chosen for the widget.
+        style_key = "Concise" if channel == "whatsapp" else (agent.response_style or "")
+        style_block = _STYLE_OVERRIDES.get(style_key, "")
         if style_block:
             parts.append(style_block)
 
