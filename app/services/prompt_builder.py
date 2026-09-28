@@ -395,8 +395,9 @@ class PromptBuilder:
             parts.append(_WHATSAPP_CHANNEL)
             parts.append(
                 self._build_customer_block(
-                    customer_name, company_name, is_first_message, is_returning_customer,
-                    is_voice_note,
+                    customer_name,
+                    self._introduction(agent, company_name),
+                    is_first_message, is_returning_customer, is_voice_note,
                 )
             )
 
@@ -423,6 +424,20 @@ class PromptBuilder:
 
         return "\n".join(parts)
 
+    def _introduction(self, agent: Agent, company_name: str) -> str:
+        """How the agent introduces itself: "Indi, from UP BUSINESS GAME", or just the company."""
+        persona = self._persona_name(agent, company_name)
+        return f"{persona}, from {company_name}" if persona else company_name
+
+    @staticmethod
+    def _persona_name(agent: Agent, company_name: str) -> str | None:
+        """The agent's own name, when it's a name of its own — not a repeat of the
+        company's (an agent called "Loja Y" at Loja Y shouldn't say "Loja Y, da Loja Y")."""
+        name = (agent.name or "").strip()
+        if not name or name.casefold() == company_name.strip().casefold():
+            return None
+        return name
+
     @staticmethod
     def _company_display_name(agent: Agent) -> str:
         """Nome fantasia when set — it's what customers know — else the legal name."""
@@ -442,12 +457,19 @@ class PromptBuilder:
         company = agent.company
         company_about = (company.description or "").strip() if company else ""
         channel_about = (agent.description or "").strip()
+        persona = self._persona_name(agent, company_name)
+        who = f"{persona}, from {company_name}" if persona else company_name
 
-        lines = [
-            "\n## Who you are",
-            "",
-            f"You answer customers on behalf of {company_name}, as part of its team.",
-        ]
+        lines = ["\n## Who you are", ""]
+        if persona:
+            # The business named its agent ("Indi"): that's who the customer is
+            # talking to. Without this the model didn't know its own name.
+            lines.append(
+                f"Your name is {persona}. You answer customers on behalf of {company_name}, "
+                "as part of its team."
+            )
+        else:
+            lines.append(f"You answer customers on behalf of {company_name}, as part of its team.")
         if company_about:
             lines.append(f"About {company_name}: {company_about}")
         if channel_about:
@@ -457,14 +479,14 @@ class PromptBuilder:
             "",
             f"- This chat and this number are {company_name}'s. When someone asks who "
             "they're talking to, whose number this is, which company this is, or what you "
-            f"do, answer warmly and with confidence: it's {company_name}, plus one sentence "
-            "on what the company does. Never say you don't know who you are or whose "
+            f"do, answer warmly and with confidence: you're {who}, plus one sentence "
+            "on what you do. Never say you don't know who you are or whose "
             "number this is.",
             "- Speak as the team (\"we\", \"a gente\", \"nós\") — not as a separate "
             "\"virtual assistant\". Don't introduce yourself as a bot, an AI or an assistant.",
             "- If someone sincerely asks whether they're talking to a person or a machine, "
-            f"be honest: you're {company_name}'s automated assistant, and someone from the "
-            "team can take over if they'd like.",
+            f"be honest: you're {persona + ', ' if persona else ''}{company_name}'s automated "
+            "assistant, and someone from the team can take over if they'd like.",
         ]
         if not company_about and not channel_about:
             lines.append(
@@ -477,7 +499,7 @@ class PromptBuilder:
     @staticmethod
     def _build_customer_block(
         customer_name: str | None,
-        company_name: str,
+        introduction: str,
         is_first_message: bool,
         is_returning_customer: bool = False,
         is_voice_note: bool = False,
@@ -507,7 +529,7 @@ class PromptBuilder:
             lines += [
                 "",
                 "This is the very first message of the conversation. Open with a short, "
-                f"warm greeting that makes clear this is {company_name}"
+                f"warm greeting that makes clear this is {introduction}"
                 + (" (use their first name)" if name else "")
                 + ", then answer what they asked — or, if they only said hi, ask how you "
                 "can help. Keep it to one or two short lines.",
