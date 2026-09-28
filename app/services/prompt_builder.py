@@ -286,6 +286,7 @@ class PromptBuilder:
         customer_name: str | None = None,
         is_returning_customer: bool = False,
         now: datetime | None = None,
+        is_voice_note: bool = False,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -296,6 +297,7 @@ class PromptBuilder:
             is_first_message=not history,
             is_returning_customer=is_returning_customer,
             now=now,
+            is_voice_note=is_voice_note,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -310,6 +312,7 @@ class PromptBuilder:
         is_first_message: bool = False,
         is_returning_customer: bool = False,
         now: datetime | None = None,
+        is_voice_note: bool = False,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
@@ -332,7 +335,8 @@ class PromptBuilder:
             parts.append(_WHATSAPP_CHANNEL)
             parts.append(
                 self._build_customer_block(
-                    customer_name, company_name, is_first_message, is_returning_customer
+                    customer_name, company_name, is_first_message, is_returning_customer,
+                    is_voice_note,
                 )
             )
 
@@ -408,6 +412,7 @@ class PromptBuilder:
         company_name: str,
         is_first_message: bool,
         is_returning_customer: bool = False,
+        is_voice_note: bool = False,
     ) -> str:
         """The person on the other end, and how to open the conversation (WhatsApp)."""
         name = _safe_customer_name(customer_name)
@@ -438,6 +443,15 @@ class PromptBuilder:
                 + (" (use their first name)" if name else "")
                 + ", then answer what they asked — or, if they only said hi, ask how you "
                 "can help. Keep it to one or two short lines.",
+            ]
+
+        if is_voice_note:
+            lines += [
+                "",
+                "Their latest message was a voice note (áudio). What you see is its "
+                "transcription, so it may have small errors — interpret it generously and "
+                "never nitpick the wording. Reply in text as you normally would; a light "
+                "touch like \"ouvi seu áudio\" is fine but not required.",
             ]
         return "\n".join(lines)
 

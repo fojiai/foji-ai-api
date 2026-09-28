@@ -9,6 +9,8 @@ Current endpoints:
   POST /internal/whatsapp/chat  — synchronous chat for WhatsApp relay
 """
 
+import base64
+import binascii
 import logging
 import secrets
 
@@ -24,6 +26,7 @@ from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.prompt_builder import PromptBuilder
 from app.services.reply_filter import clean_reply
+from app.services.transcription import TranscriptionError, transcribe
 from app.services.rate_limit_service import (
     RateLimitExceededException,
     RateLimitService,
@@ -49,7 +52,11 @@ def verify_internal_key(x_internal_key: str | None = Header(default=None)) -> No
 class WhatsAppChatRequest(BaseModel):
     agent_token: str
     session_id: str  # typically "wa:<phone_number>" — namespaced by caller
-    message: str
+    message: str = ""
+    # A voice note, when the customer sent audio instead of text. Transcribed
+    # here and answered like a typed message.
+    audio_base64: str | None = None
+    audio_mime: str | None = None
     sender_phone: str | None = None  # the wa_id, used to create the CRM contact
     profile_name: str | None = None  # the sender's WhatsApp display name
 
@@ -57,6 +64,32 @@ class WhatsAppChatRequest(BaseModel):
 class WhatsAppChatResponse(BaseModel):
     reply: str
     session_id: str
+
+
+# When a voice note can't be used, answer like a person who couldn't hear it —
+# never with silence.
+_VOICE_REPLIES = {
+    "failed": {
+        "PtBr": "Não consegui ouvir seu áudio agora 😅 Pode me mandar por escrito?",
+        "Es": "No pude escuchar tu audio ahora 😅 ¿Me lo puedes escribir?",
+        "En": "I couldn't play your voice message just now 😅 Could you type it for me?",
+    },
+    "unclear": {
+        "PtBr": "Não consegui entender seu áudio direitinho 😅 Pode repetir ou mandar por escrito?",
+        "Es": "No logré entender bien tu audio 😅 ¿Lo repites o me lo escribes?",
+        "En": "I couldn't quite make out your voice message 😅 Could you repeat it or type it?",
+    },
+    "too_long": {
+        "PtBr": "Esse áudio ficou grande demais pra eu ouvir por aqui 😅 Consegue me mandar um resumo por escrito?",
+        "Es": "Ese audio es demasiado largo para escucharlo por aquí 😅 ¿Me mandas un resumen por escrito?",
+        "En": "That voice message is too long for me to play here 😅 Could you send me a short summary in text?",
+    },
+}
+
+
+def _voice_reply(agent, kind: str) -> str:
+    replies = _VOICE_REPLIES[kind]
+    return replies.get(agent.agent_language) or replies["PtBr"]
 
 
 async def _capture_whatsapp_lead(
@@ -147,6 +180,35 @@ async def whatsapp_chat(
     if conversation.is_new and not conversation.is_returning and body.sender_phone:
         await _capture_whatsapp_lead(agent.id, body.session_id, body.sender_phone, body.profile_name)
 
+    # 2d. What did they say? A voice note is transcribed and answered like text.
+    # If it can't be heard, say so kindly and ask for text — never silence.
+    user_message = body.message.strip()
+    is_voice_note = False
+    if body.audio_base64:
+        try:
+            audio = base64.b64decode(body.audio_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid audio.")
+
+        if len(audio) > get_settings().voice_note_max_bytes:
+            return WhatsAppChatResponse(reply=_voice_reply(agent, "too_long"), session_id=body.session_id)
+
+        try:
+            transcript = await transcribe(audio, body.audio_mime, agent.agent_language)
+        except TranscriptionError:
+            logger.warning("Voice note from session=%s could not be transcribed", body.session_id)
+            return WhatsAppChatResponse(reply=_voice_reply(agent, "failed"), session_id=body.session_id)
+
+        if not transcript:
+            return WhatsAppChatResponse(reply=_voice_reply(agent, "unclear"), session_id=body.session_id)
+
+        # A caption can't accompany a voice note, but keep any text just in case.
+        user_message = f"{user_message}\n\n{transcript}".strip() if user_message else transcript
+        is_voice_note = True
+
+    if not user_message:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty message.")
+
     # 3. Build file context
     file_ctx_svc = FileContextService()
     file_context = await file_ctx_svc.build(agent)
@@ -154,12 +216,13 @@ async def whatsapp_chat(
     # 4. Build prompt
     system_prompt, messages = PromptBuilder(get_settings().business_timezone).build(
         agent=agent,
-        user_message=body.message,
+        user_message=user_message,
         history=history,
         file_context=file_context,
         channel="whatsapp",
         customer_name=body.profile_name,
         is_returning_customer=conversation.is_returning,
+        is_voice_note=is_voice_note,
     )
 
     # 5. Select provider and collect full response (no streaming for WA)
@@ -187,7 +250,7 @@ async def whatsapp_chat(
     try:
         await history_svc.save(
             session_id=body.session_id,
-            user_message=body.message,
+            user_message=user_message,
             assistant_message=reply,
             provider=provider.provider_name,
             agent_id=agent.id,

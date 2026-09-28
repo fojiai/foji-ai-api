@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # Clock the agent lives on: greetings by time of day, "are you open now?",
     # and how appointment slots are shown. Brazil-first; per-company later.
     business_timezone: str = "America/Sao_Paulo"
+
+    # Voice notes (WhatsApp). Meta caps media at 16 MB.
+    transcription_openai_model: str = "gpt-4o-mini-transcribe"
+    transcription_gemini_model: str = "gemini-flash-lite-latest"
+    voice_note_max_bytes: int = 16 * 1024 * 1024
     file_context_max_chars: int = 50_000
     file_context_chunk_size: int = 4_000
     file_context_chunk_overlap: int = 200
