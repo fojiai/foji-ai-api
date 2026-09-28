@@ -9,3 +9,4 @@ from app.models.subscription import Subscription  # noqa: F401
 from app.models.platform_setting import PlatformSetting  # noqa: F401
 from app.models.lead import Lead  # noqa: F401
 from app.models.calendar_connection import AgentCalendarConnection  # noqa: F401
+from app.models.whatsapp_message import WhatsAppMessage  # noqa: F401

@@ -99,11 +99,12 @@ lecture or go cold.
   next concrete step. Frustrated people want progress, not paragraphs.
 - Offer a person early when someone is upset, has a complaint, wants a refund or
   a manager, says your previous answer didn't help, or has a problem you can't
-  solve here. Use the human contacts listed below and make it easy ("se preferir
-  falar com alguém da equipe, é só chamar no …").
-- Only promise a human if a human contact is actually listed below. If none is,
-  don't invent one — do your best to solve it yourself and say plainly what you
-  can do.
+  solve here — by calling your team into this chat when that's available (see
+  below), otherwise with the human contacts listed below ("se preferir falar com
+  alguém da equipe, é só chamar no …").
+- Only promise a human if one is actually reachable: your team in this chat, or
+  a contact listed below. If neither is, don't invent one — do your best to solve
+  it yourself and say plainly what you can do.
 - If it's genuine abuse — slurs, threats, harassment — don't engage with it or
   react to it. Stay polite and brief, say you're here to help with their issue,
   and give the human contact if one is listed. Never retaliate.
@@ -124,6 +125,27 @@ customer — not like a web page, and not like a robot.
   [text](links).
 - Avoid bullet lists. If you must list a few things, one per line with a dash.
 - Share a link as a plain URL on its own line.
+"""
+
+HANDOFF_MARKER = "[[CHAMAR_EQUIPE]]"
+
+_TEAM_IN_CHAT = """
+## Your team is in this chat
+
+People from the team can join this same WhatsApp conversation. In the history,
+messages that start with a name and a colon (e.g. "Ana:") were written by one of
+them — treat them as your teammates' words and stay consistent with them.
+
+Call the team when the person asks to talk to a person, is upset or frustrated,
+has a complaint, wants a refund or a manager, or you genuinely can't solve their
+problem. When you do:
+- Tell them warmly, in one short line, that you're bringing someone from the team
+  into this conversation (e.g. "vou chamar alguém da equipe pra falar com você,
+  só um instante 🙂"). Don't send other phone numbers or emails for this — the
+  person will answer right here.
+- Put this marker alone on the very last line: [[CHAMAR_EQUIPE]]
+
+Only use the marker in those cases, and never mention or explain it.
 """
 
 _STYLE_OVERRIDES: dict[str, str] = {
@@ -287,6 +309,7 @@ class PromptBuilder:
         is_returning_customer: bool = False,
         now: datetime | None = None,
         is_voice_note: bool = False,
+        team_in_chat: bool = False,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -298,6 +321,7 @@ class PromptBuilder:
             is_returning_customer=is_returning_customer,
             now=now,
             is_voice_note=is_voice_note,
+            team_in_chat=team_in_chat,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -313,6 +337,7 @@ class PromptBuilder:
         is_returning_customer: bool = False,
         now: datetime | None = None,
         is_voice_note: bool = False,
+        team_in_chat: bool = False,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
@@ -343,9 +368,14 @@ class PromptBuilder:
         if agent.user_prompt and agent.user_prompt.strip():
             parts.append(f"\n\n## Additional Instructions\n\n{agent.user_prompt.strip()}")
 
-        escalation = self._build_escalation_block(agent)
-        if escalation:
-            parts.append(escalation)
+        if team_in_chat:
+            # Hybrid mode: a person is reachable right here, so "offer a human"
+            # means calling them in — not sending the customer to another number.
+            parts.append(_TEAM_IN_CHAT)
+        else:
+            escalation = self._build_escalation_block(agent)
+            if escalation:
+                parts.append(escalation)
 
         if available_slots is not None:
             parts.append(self._build_calendar_block(available_slots, agent.agent_language))

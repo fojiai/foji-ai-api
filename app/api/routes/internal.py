@@ -12,6 +12,7 @@ Current endpoints:
 import base64
 import binascii
 import logging
+import re
 import secrets
 
 import httpx
@@ -24,6 +25,7 @@ from app.core.database import get_db
 from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
+from app.services.inbox_history import load_inbox_conversation
 from app.services.prompt_builder import PromptBuilder
 from app.services.reply_filter import clean_reply
 from app.services.transcription import TranscriptionError, transcribe
@@ -59,11 +61,41 @@ class WhatsAppChatRequest(BaseModel):
     audio_mime: str | None = None
     sender_phone: str | None = None  # the wa_id, used to create the CRM contact
     profile_name: str | None = None  # the sender's WhatsApp display name
+    # Hybrid mode: the team can step into this chat, and the conversation lives
+    # in the inbox thread (which has what the team said, too).
+    hybrid: bool = False
+    inbox_conversation_id: int | None = None
+    # The inbound message being answered — already recorded in the inbox thread
+    # by the worker, so it's left out of the history.
+    exclude_wam_id: str | None = None
 
 
 class WhatsAppChatResponse(BaseModel):
     reply: str
     session_id: str
+    # Hybrid mode: the AI decided a person should take over.
+    handoff: bool = False
+
+
+# The marker the model puts on its last line to call the team, plus a bare
+# variant in case the brackets get lost.
+_HANDOFF_RE = re.compile(r"\[\[\s*CHAMAR_EQUIPE\s*\]\]|^\s*CHAMAR_EQUIPE\s*$", re.IGNORECASE | re.MULTILINE)
+
+_HANDOFF_DEFAULT = {
+    "PtBr": "Vou chamar alguém da equipe pra falar com você, só um instante 🙂",
+    "Es": "Voy a llamar a alguien del equipo para que hable contigo, un momento 🙂",
+    "En": "I'll bring someone from the team into this chat — just a moment 🙂",
+}
+
+
+def _extract_handoff(text: str, agent) -> tuple[str, bool]:
+    """Strip the handoff marker; returns (reply, handoff_requested)."""
+    if not _HANDOFF_RE.search(text):
+        return text, False
+    reply = _HANDOFF_RE.sub("", text).strip()
+    if not reply:
+        reply = _HANDOFF_DEFAULT.get(agent.agent_language) or _HANDOFF_DEFAULT["PtBr"]
+    return reply, True
 
 
 # When a voice note can't be used, answer like a person who couldn't hear it —
@@ -147,10 +179,19 @@ async def whatsapp_chat(
     # conversation ends silently after a day of inactivity (Meta's service
     # window): the next message starts fresh instead of dragging in stale context.
     history_svc = ChatHistoryService()
-    conversation = await history_svc.load_conversation(
-        body.session_id,
-        idle_timeout_seconds=get_settings().conversation_idle_timeout_whatsapp_seconds,
-    )
+    idle = get_settings().conversation_idle_timeout_whatsapp_seconds
+    if body.hybrid and body.inbox_conversation_id:
+        # Hybrid: the inbox thread is the whole conversation — customer, AI and
+        # whatever the team wrote while they had it.
+        conversation = await load_inbox_conversation(
+            db,
+            body.inbox_conversation_id,
+            exclude_wam_id=body.exclude_wam_id,
+            idle_timeout_seconds=idle,
+            max_messages=get_settings().chat_history_max_messages,
+        )
+    else:
+        conversation = await history_svc.load_conversation(body.session_id, idle_timeout_seconds=idle)
     history = conversation.messages
 
     # 2b. Enforce subscription + monthly limits on WhatsApp too, before any
@@ -223,6 +264,7 @@ async def whatsapp_chat(
         customer_name=body.profile_name,
         is_returning_customer=conversation.is_returning,
         is_voice_note=is_voice_note,
+        team_in_chat=body.hybrid,
     )
 
     # 5. Select provider and collect full response (no streaming for WA)
@@ -237,8 +279,13 @@ async def whatsapp_chat(
     chunks: list[str] = []
     async for chunk in provider.stream_chat(messages, system_prompt):
         chunks.append(chunk)
+    raw = "".join(chunks)
+    # Hybrid: the model calls the team with a marker on its last line.
+    handoff = False
+    if body.hybrid:
+        raw, handoff = _extract_handoff(raw, agent)
     # Backstop for "according to my documents"-style tics the prompt forbids.
-    reply = clean_reply("".join(chunks)).strip()
+    reply = clean_reply(raw).strip()
 
     if not reply:
         raise HTTPException(
@@ -260,7 +307,7 @@ async def whatsapp_chat(
     except Exception:
         logger.warning("Failed to save WhatsApp chat history for session=%s", body.session_id)
 
-    return WhatsAppChatResponse(reply=reply, session_id=body.session_id)
+    return WhatsAppChatResponse(reply=reply, session_id=body.session_id, handoff=handoff)
 
 
 # ── CRM email drafting ─────────────────────────────────────────────────────────
