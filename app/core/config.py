@@ -54,6 +54,10 @@ class Settings(BaseSettings):
 
     # Chat behaviour
     chat_history_max_messages: int = 20
+    # A conversation ends silently after this much inactivity; the next message
+    # starts a new one. WhatsApp matches Meta's 24h customer-service window.
+    conversation_idle_timeout_whatsapp_seconds: int = 24 * 3600
+    conversation_idle_timeout_widget_seconds: int = 30 * 60
     file_context_max_chars: int = 50_000
     file_context_chunk_size: int = 4_000
     file_context_chunk_overlap: int = 200

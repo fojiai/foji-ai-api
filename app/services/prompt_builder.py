@@ -197,6 +197,7 @@ class PromptBuilder:
         available_slots: list[dict] | None = None,
         channel: str = "widget",
         customer_name: str | None = None,
+        is_returning_customer: bool = False,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -205,6 +206,7 @@ class PromptBuilder:
             channel,
             customer_name=customer_name,
             is_first_message=not history,
+            is_returning_customer=is_returning_customer,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -217,6 +219,7 @@ class PromptBuilder:
         channel: str = "widget",
         customer_name: str | None = None,
         is_first_message: bool = False,
+        is_returning_customer: bool = False,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
@@ -236,7 +239,11 @@ class PromptBuilder:
         # when the business picked a style that would otherwise add structure.
         if channel == "whatsapp":
             parts.append(_WHATSAPP_CHANNEL)
-            parts.append(self._build_customer_block(customer_name, company_name, is_first_message))
+            parts.append(
+                self._build_customer_block(
+                    customer_name, company_name, is_first_message, is_returning_customer
+                )
+            )
 
         if agent.user_prompt and agent.user_prompt.strip():
             parts.append(f"\n\n## Additional Instructions\n\n{agent.user_prompt.strip()}")
@@ -306,7 +313,10 @@ class PromptBuilder:
 
     @staticmethod
     def _build_customer_block(
-        customer_name: str | None, company_name: str, is_first_message: bool
+        customer_name: str | None,
+        company_name: str,
+        is_first_message: bool,
+        is_returning_customer: bool = False,
     ) -> str:
         """The person on the other end, and how to open the conversation (WhatsApp)."""
         name = _safe_customer_name(customer_name)
@@ -320,7 +330,16 @@ class PromptBuilder:
         else:
             lines.append("You don't know their name yet.")
 
-        if is_first_message:
+        if is_first_message and is_returning_customer:
+            lines += [
+                "",
+                "They've talked to you before, and this message starts a new conversation "
+                "after a break. Welcome them back briefly and naturally (e.g. \"Oi de novo"
+                + (", <first name>" if name else "")
+                + "!\") — don't re-introduce the company from scratch and don't bring up "
+                "the old conversation — then answer what they asked. One or two short lines.",
+            ]
+        elif is_first_message:
             lines += [
                 "",
                 "This is the very first message of the conversation. Open with a short, "

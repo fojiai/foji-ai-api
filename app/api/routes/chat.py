@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 STREAM_TIMEOUT_SECONDS = 300  # 5 minutes max per chat stream
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.exceptions import AgentInactiveException, AgentNotFoundException, ProviderException
 from app.providers.router import ProviderRouter
@@ -88,8 +89,14 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     # client: the widget is public and the agent token sits in the page, so
     # sending a fresh random session_id on every request made is_new_session
     # permanently False and skipped the conversation cap entirely.
-    history = await _history_svc.load(session_id)
-    is_new_session = not history
+    # A tab left open for hours keeps its session_id, so the conversation ends
+    # silently after half an hour idle and the next message starts a new one.
+    conversation = await _history_svc.load_conversation(
+        session_id,
+        idle_timeout_seconds=get_settings().conversation_idle_timeout_widget_seconds,
+    )
+    history = conversation.messages
+    is_new_session = conversation.is_new
 
     # 4. Check monthly rate limits (soft-enforce via DailyStats, up to 24h lag)
     try:
@@ -134,7 +141,10 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     providers = await _provider_router.select_all(db)
 
     return EventSourceResponse(
-        _stream(providers, system_prompt, messages, session_id, req.message, agent.id, agent.company_id),
+        _stream(
+            providers, system_prompt, messages, session_id, req.message,
+            agent.id, agent.company_id, conversation_start=conversation.is_new,
+        ),
         media_type="text/event-stream",
         ping=0,  # Disable sse_starlette's internal ping (we handle our own events)
         headers={
@@ -174,6 +184,7 @@ async def _stream(
     user_message: str,
     agent_id: int,
     company_id: int,
+    conversation_start: bool = False,
 ) -> AsyncIterator[str]:
     last_error: Exception | None = None
 
@@ -213,7 +224,8 @@ async def _stream(
             try:
                 await _history_svc.save(
                     session_id, user_message, clean_response,
-                    provider.provider_name, agent_id, company_id
+                    provider.provider_name, agent_id, company_id,
+                    conversation_start=conversation_start,
                 )
             except Exception:
                 logger.exception("Failed to persist chat history — continuing")

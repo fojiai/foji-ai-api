@@ -110,9 +110,15 @@ async def whatsapp_chat(
     agent_svc = AgentService(db)
     agent = await agent_svc.get_by_token(body.agent_token)
 
-    # 2. Load chat history (also tells us whether this is a new conversation)
+    # 2. Load the conversation in progress. "wa:<phone>" lives forever, so a
+    # conversation ends silently after a day of inactivity (Meta's service
+    # window): the next message starts fresh instead of dragging in stale context.
     history_svc = ChatHistoryService()
-    history = await history_svc.load(body.session_id)
+    conversation = await history_svc.load_conversation(
+        body.session_id,
+        idle_timeout_seconds=get_settings().conversation_idle_timeout_whatsapp_seconds,
+    )
+    history = conversation.messages
 
     # 2b. Enforce subscription + monthly limits on WhatsApp too, before any
     # expensive work. This path used to skip RateLimitService entirely, so
@@ -127,16 +133,18 @@ async def whatsapp_chat(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail="The current plan does not include WhatsApp.",
             )
-        await rate_limit_svc.check(db, agent.company_id, is_new_session=not history)
+        await rate_limit_svc.check(db, agent.company_id, is_new_session=conversation.is_new)
     except SubscriptionInactiveException as exc:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
     except RateLimitExceededException as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
 
-    # 2c. First message of a conversation → capture it as a lead so the sender
-    # becomes a deduped CRM contact and the conversation shows up on their
-    # timeline. Best-effort: a CRM hiccup must never cost the user a reply.
-    if not history and body.sender_phone:
+    # 2c. First-ever contact → capture it as a lead so the sender becomes a
+    # deduped CRM contact and the conversation shows up on their timeline.
+    # Only first contact, not every new conversation: a regular customer who
+    # writes back after a day is not a new lead. Best-effort: a CRM hiccup must
+    # never cost the user a reply.
+    if conversation.is_new and not conversation.is_returning and body.sender_phone:
         await _capture_whatsapp_lead(agent.id, body.session_id, body.sender_phone, body.profile_name)
 
     # 3. Build file context
@@ -151,6 +159,7 @@ async def whatsapp_chat(
         file_context=file_context,
         channel="whatsapp",
         customer_name=body.profile_name,
+        is_returning_customer=conversation.is_returning,
     )
 
     # 5. Select provider and collect full response (no streaming for WA)
@@ -183,6 +192,7 @@ async def whatsapp_chat(
             provider=provider.provider_name,
             agent_id=agent.id,
             company_id=agent.company_id,
+            conversation_start=conversation.is_new,
         )
     except Exception:
         logger.warning("Failed to save WhatsApp chat history for session=%s", body.session_id)

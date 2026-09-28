@@ -8,7 +8,15 @@ Table schema:
     role, content, provider, agent_id, company_id
     input_tokens, output_tokens   — for analytics aggregation
     date_partition                — YYYY-MM-DD, used by the nightly analytics Lambda to scan
+    conversation_start            — True on the first exchange of a conversation;
+                                    the analytics Lambda counts conversations by it
   TTL: expires_at    (90 days from creation, Unix epoch seconds)
+
+Conversations
+  A session_id is long-lived (a WhatsApp number is "wa:<phone>" forever), so a
+  session is not a conversation. A conversation ends silently after a stretch of
+  inactivity: the next message starts a new one, with a fresh greeting and none
+  of the stale context. No "this chat has ended" message is ever sent.
 """
 
 import asyncio
@@ -38,6 +46,53 @@ def _estimate_tokens(text: str) -> int:
 class ChatMessage:
     role: str  # "user" | "assistant"
     content: str
+
+
+@dataclass
+class Conversation:
+    """The current conversation on a session, as the prompt should see it."""
+
+    messages: list[ChatMessage]
+    # No messages in the current conversation: this message starts a new one.
+    is_new: bool
+    # There were earlier messages on this session, just not in this conversation
+    # (they came before the inactivity gap). "Oi de novo" rather than "Oi".
+    is_returning: bool
+
+
+def _split_current_conversation(
+    items_newest_first: list[dict],
+    now_ms: int,
+    idle_timeout_ms: int | None,
+    max_messages: int,
+) -> Conversation:
+    """
+    Keep only the messages that belong to the conversation still in progress.
+
+    Walks back from the newest message and stops at the first gap longer than the
+    idle timeout. If even the newest message is older than the timeout, the
+    conversation is over and the next message starts a fresh one.
+    """
+    if not items_newest_first:
+        return Conversation(messages=[], is_new=True, is_returning=False)
+
+    newest_ts = int(items_newest_first[0]["timestamp"])
+    if idle_timeout_ms is not None and now_ms - newest_ts > idle_timeout_ms:
+        return Conversation(messages=[], is_new=True, is_returning=True)
+
+    kept = [items_newest_first[0]]
+    for newer, older in zip(items_newest_first, items_newest_first[1:]):
+        if idle_timeout_ms is not None and int(newer["timestamp"]) - int(older["timestamp"]) > idle_timeout_ms:
+            break
+        kept.append(older)
+
+    kept = kept[:max_messages]
+    kept.reverse()  # oldest first, as the model reads it
+    return Conversation(
+        messages=[ChatMessage(role=i["role"], content=i["content"]) for i in kept],
+        is_new=False,
+        is_returning=False,
+    )
 
 
 class ChatHistoryService:
@@ -94,19 +149,37 @@ class ChatHistoryService:
         return deleted
 
     async def load(self, session_id: str) -> list[ChatMessage]:
-        """Return the last N messages for this session, oldest first."""
+        """Return the last N messages for this session, oldest first (no idle cut-off)."""
+        return (await self.load_conversation(session_id, idle_timeout_seconds=None)).messages
+
+    async def load_conversation(
+        self, session_id: str, idle_timeout_seconds: int | None
+    ) -> Conversation:
+        """
+        Return the conversation in progress on this session.
+
+        Reads newest-first and stops after N+1 items. The old version read
+        oldest-first and sliced the tail, but a DynamoDB query returns at most
+        1 MB per call, so on a long-lived session (a WhatsApp number with months
+        of messages) that tail was the oldest messages, not the latest ones.
+        """
         try:
             response = await asyncio.to_thread(
                 self._table.query,
                 KeyConditionExpression=Key("session_id").eq(session_id),
-                ScanIndexForward=True,
+                ScanIndexForward=False,  # newest first
+                # One past the cap, so a gap just beyond the window is still visible.
+                Limit=self._max_messages + 1,
             )
-            items = response.get("Items", [])
-            items = items[-self._max_messages :]
-            return [ChatMessage(role=item["role"], content=item["content"]) for item in items]
+            return _split_current_conversation(
+                response.get("Items", []),
+                now_ms=int(time.time() * 1000),
+                idle_timeout_ms=idle_timeout_seconds * 1000 if idle_timeout_seconds else None,
+                max_messages=self._max_messages,
+            )
         except Exception:
             logger.exception("Failed to load chat history for session %s", session_id)
-            return []
+            return Conversation(messages=[], is_new=True, is_returning=False)
 
     async def save(
         self,
@@ -118,8 +191,13 @@ class ChatHistoryService:
         company_id: int,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        conversation_start: bool = False,
     ) -> None:
-        """Persist the user/assistant pair. Fire-and-forget friendly."""
+        """Persist the user/assistant pair. Fire-and-forget friendly.
+
+        conversation_start marks the exchange that opens a conversation; the
+        nightly analytics Lambda counts conversations by it.
+        """
         now_ms = int(time.time() * 1000)
         expires_at = int(time.time()) + _TTL_SECONDS
         date_partition = date.today().isoformat()
@@ -140,6 +218,7 @@ class ChatHistoryService:
                 "output_tokens": 0,
                 "date_partition": date_partition,
                 "expires_at": expires_at,
+                "conversation_start": conversation_start,
             },
             {
                 "session_id": session_id,
@@ -153,6 +232,7 @@ class ChatHistoryService:
                 "output_tokens": actual_output_tokens,
                 "date_partition": date_partition,
                 "expires_at": expires_at,
+                "conversation_start": conversation_start,
             },
         ]
 
