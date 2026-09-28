@@ -36,6 +36,7 @@ from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.google_calendar_service import GoogleCalendarService
 from app.services.prompt_builder import PromptBuilder
+from app.services.reply_filter import StreamingReplyFilter
 from app.services.rate_limit_service import (
     RateLimitExceededException,
     RateLimitService,
@@ -178,14 +179,24 @@ async def _stream(
 
     for i, provider in enumerate(providers):
         collected: list[str] = []
+        # Holds back only the sentence in progress, so an "according to my
+        # documents" phrase is removed before the widget ever renders it.
+        reply_filter = StreamingReplyFilter()
         try:
             logger.debug(
                 "Trying provider %d/%d: %s", i + 1, len(providers), provider.provider_name
             )
             async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
                 async for chunk in provider.stream_chat(messages, system_prompt):
-                    collected.append(chunk)
-                    yield json.dumps({"chunk": chunk})
+                    clean_chunk = reply_filter.feed(chunk)
+                    if clean_chunk:
+                        collected.append(clean_chunk)
+                        yield json.dumps({"chunk": clean_chunk})
+
+            tail = reply_filter.flush()
+            if tail:
+                collected.append(tail)
+                yield json.dumps({"chunk": tail})
 
             full_response = "".join(collected)
 

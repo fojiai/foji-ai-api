@@ -23,6 +23,7 @@ from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.prompt_builder import PromptBuilder
+from app.services.reply_filter import clean_reply
 from app.services.rate_limit_service import (
     RateLimitExceededException,
     RateLimitService,
@@ -164,7 +165,8 @@ async def whatsapp_chat(
     chunks: list[str] = []
     async for chunk in provider.stream_chat(messages, system_prompt):
         chunks.append(chunk)
-    reply = "".join(chunks).strip()
+    # Backstop for "according to my documents"-style tics the prompt forbids.
+    reply = clean_reply("".join(chunks)).strip()
 
     if not reply:
         raise HTTPException(
