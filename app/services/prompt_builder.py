@@ -127,6 +127,19 @@ customer — not like a web page, and not like a robot.
 - Share a link as a plain URL on its own line.
 """
 
+_PHOTO_BLOCK = """
+## They sent a photo
+
+Their latest message includes a photo (attached). Look at it and respond to what
+they actually need — a product they want, a problem they're showing, a
+screenshot, a receipt. Refer to what you see naturally, the way a person would,
+without describing the whole image back to them. If you can't tell what they
+want from it, ask one short question.
+- Never identify or guess who a person in a photo is from their face.
+- If it shows documents, card numbers, IDs, addresses or other personal data,
+  never repeat those details back — just help with what they asked.
+"""
+
 HANDOFF_MARKER = "[[CHAMAR_EQUIPE]]"
 
 _TEAM_IN_CHAT = """
@@ -383,9 +396,12 @@ class PromptBuilder:
             parts.append(
                 self._build_customer_block(
                     customer_name, company_name, is_first_message, is_returning_customer,
-                    is_voice_note, has_photo,
+                    is_voice_note,
                 )
             )
+
+        if has_photo:
+            parts.append(_PHOTO_BLOCK)
 
         if agent.user_prompt and agent.user_prompt.strip():
             parts.append(f"\n\n## Additional Instructions\n\n{agent.user_prompt.strip()}")
@@ -465,7 +481,6 @@ class PromptBuilder:
         is_first_message: bool,
         is_returning_customer: bool = False,
         is_voice_note: bool = False,
-        has_photo: bool = False,
     ) -> str:
         """The person on the other end, and how to open the conversation (WhatsApp)."""
         name = _safe_customer_name(customer_name)
@@ -507,18 +522,6 @@ class PromptBuilder:
                 "touch like \"ouvi seu áudio\" is fine but not required.",
             ]
 
-        if has_photo:
-            lines += [
-                "",
-                "Their latest message includes a photo (attached). Look at it and respond "
-                "to what they actually need — a product they want, a problem they're "
-                "showing, a screenshot, a receipt. Refer to what you see naturally, the "
-                "way a person would, without describing the whole image back to them. If "
-                "you can't tell what they want from it, ask one short question.",
-                "- Never identify or guess who a person in a photo is from their face.",
-                "- If it shows documents, card numbers, IDs, addresses or other personal "
-                "data, never repeat those details back — just help with what they asked.",
-            ]
         return "\n".join(lines)
 
     def _build_escalation_block(self, agent: Agent) -> str:

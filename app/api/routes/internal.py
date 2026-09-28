@@ -26,6 +26,8 @@ from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.inbox_history import load_inbox_conversation
+from app.services.photo import NO_CAPTION_MESSAGE, InvalidPhoto, decode_photo
+from app.services.photo import history_text as photo_history_text
 from app.services.prompt_builder import PromptBuilder
 from app.services.reply_filter import clean_reply
 from app.services.transcription import TranscriptionError, transcribe
@@ -281,21 +283,16 @@ async def whatsapp_chat(
 
     # 2e. A photo. The model sees the image itself; the caption (if any) is the
     # text. History only keeps "[imagem] caption" — the image isn't stored there.
-    photo: bytes | None = None
-    photo_mime = (body.image_mime or "image/jpeg").split(";")[0].strip().lower()
-    if body.image_base64:
-        try:
-            photo = base64.b64decode(body.image_base64, validate=True)
-        except (binascii.Error, ValueError):
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image.")
-        if len(photo) > get_settings().photo_max_bytes or not photo_mime.startswith("image/"):
-            photo = None  # answer the caption alone rather than fail
+    try:
+        photo, photo_mime = decode_photo(body.image_base64, body.image_mime, get_settings().photo_max_bytes)
+    except InvalidPhoto:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image.")
 
     history_message = user_message
     if photo is not None:
-        history_message = f"[imagem] {user_message}".strip()
+        history_message = photo_history_text(user_message)
         if not user_message:
-            user_message = "[The customer sent this photo without any text.]"
+            user_message = NO_CAPTION_MESSAGE
 
     if not user_message:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty message.")

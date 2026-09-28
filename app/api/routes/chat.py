@@ -36,6 +36,8 @@ from app.services.agent_service import AgentService
 from app.services.chat_history import ChatHistoryService
 from app.services.file_context import FileContextService
 from app.services.google_calendar_service import GoogleCalendarService
+from app.services.photo import NO_CAPTION_MESSAGE, InvalidPhoto, decode_photo
+from app.services.photo import history_text as photo_history_text
 from app.services.prompt_builder import PromptBuilder
 from app.services.reply_filter import StreamingReplyFilter
 from app.services.rate_limit_service import (
@@ -66,8 +68,14 @@ _SUGGESTION_RE = re.compile(
 
 class ChatRequest(BaseModel):
     agent_token: str = Field(..., min_length=1)
-    message: str = Field(..., min_length=1, max_length=8000)
+    # May be empty when the visitor sends just a photo.
+    message: str = Field(default="", max_length=8000)
     session_id: str | None = Field(default=None)
+    # A photo the visitor attached (the widget downsizes it first). ~7 MB of
+    # base64 is a hard ceiling on the request; the decoded image is capped at
+    # photo_max_bytes.
+    image_base64: str | None = Field(default=None, max_length=7_000_000)
+    image_mime: str | None = Field(default=None, max_length=50)
 
 
 @router.post("/chat")
@@ -133,16 +141,30 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
             )
 
     # 5b. Prompt (with calendar slots if available)
+    # A photo: the model sees it; history keeps "[imagem] caption".
+    try:
+        photo, photo_mime = decode_photo(req.image_base64, req.image_mime, get_settings().photo_max_bytes)
+    except InvalidPhoto:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image.")
+    user_message = req.message.strip()
+    history_message = photo_history_text(user_message) if photo is not None else user_message
+    if photo is not None and not user_message:
+        user_message = NO_CAPTION_MESSAGE
+    if not user_message:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty message.")
+
     system_prompt, messages = _prompt_builder.build(
-        agent, req.message, history, file_context, available_slots
+        agent, user_message, history, file_context, available_slots, has_photo=photo is not None
     )
+    if photo is not None:
+        messages[-1]["images"] = [{"data": photo, "mime": photo_mime}]
 
     # 6. DB-first provider selection — all active models, shuffled for failover
     providers = await _provider_router.select_all(db)
 
     return EventSourceResponse(
         _stream(
-            providers, system_prompt, messages, session_id, req.message,
+            providers, system_prompt, messages, session_id, history_message,
             agent.id, agent.company_id, conversation_start=conversation.is_new,
         ),
         media_type="text/event-stream",
