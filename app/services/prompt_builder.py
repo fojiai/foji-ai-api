@@ -1,4 +1,7 @@
+import json
 import re
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.agent import Agent
 from app.services.chat_history import ChatMessage
@@ -168,9 +171,11 @@ _CALENDAR_BLOCK_TEMPLATE = """
 
 ## Google Calendar — Appointment Scheduling
 
-The business owner has connected their Google Calendar. The following time slots are available for appointments in the next 7 days (all times are in UTC):
+The business owner has connected their Google Calendar. These time slots are free for appointments in the next 7 days ({tz_label}):
 
 {slots_list}
+
+When you mention a slot to the customer, use the wording above — never convert it or add a timezone name.
 
 **When to suggest scheduling:** Only propose an appointment when the conversation clearly warrants it — for example, when the user asks about a consultation, demo, meeting, or explicitly wants to book time. Do NOT offer scheduling for simple FAQ questions.
 
@@ -182,6 +187,52 @@ The business owner has connected their Google Calendar. The following time slots
 
 If scheduling is not relevant to this response, do not include any JSON block.
 """
+
+_DEFAULT_TIMEZONE = "America/Sao_Paulo"
+
+# Written out rather than taken from strftime, which follows the server locale
+# (English) — a Brazilian customer shouldn't be offered "Monday, Sep 29".
+_WEEKDAYS = {
+    "PtBr": ("segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"),
+    "Es": ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+    "En": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+}
+_EN_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _timezone_label(tz_name: str) -> str:
+    return {
+        "America/Sao_Paulo": "horário de Brasília",
+        "America/Fortaleza": "horário de Brasília",
+        "America/Recife": "horário de Brasília",
+        "America/Bahia": "horário de Brasília",
+    }.get(tz_name, tz_name)
+
+
+def _clock(dt: datetime, lang: str) -> str:
+    if lang == "PtBr":
+        return f"{dt.hour}h" if dt.minute == 0 else f"{dt.hour}h{dt.minute:02d}"
+    if lang == "Es":
+        return f"{dt.hour}:{dt.minute:02d}"
+    hour12 = dt.hour % 12 or 12
+    return f"{hour12}:{dt.minute:02d} {'AM' if dt.hour < 12 else 'PM'}"
+
+
+def _format_slot(start_iso: str, end_iso: str, tz: ZoneInfo, lang: str) -> str:
+    """One free slot, in the business's timezone and the agent's language."""
+    try:
+        start = datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(tz)
+        end = datetime.fromisoformat(end_iso.replace("Z", "+00:00")).astimezone(tz)
+    except (ValueError, AttributeError):
+        return f"{start_iso} → {end_iso}"
+
+    weekday = _WEEKDAYS.get(lang, _WEEKDAYS["En"])[start.weekday()]
+    if lang == "PtBr":
+        return f"{weekday}, {start:%d/%m}, das {_clock(start, lang)} às {_clock(end, lang)}"
+    if lang == "Es":
+        return f"{weekday} {start:%d/%m}, de {_clock(start, lang)} a {_clock(end, lang)}"
+    return f"{weekday}, {_EN_MONTHS[start.month - 1]} {start.day}, {_clock(start, lang)}–{_clock(end, lang)}"
+
 
 # A WhatsApp display name is chosen by the sender, so it is untrusted input
 # going into the system prompt. Keep only characters a name plausibly has and
@@ -216,6 +267,14 @@ class PromptBuilder:
       messages       = history + current user message
     """
 
+    def __init__(self, timezone_name: str = _DEFAULT_TIMEZONE) -> None:
+        try:
+            self._tz = ZoneInfo(timezone_name)
+            self._tz_name = timezone_name
+        except (ZoneInfoNotFoundError, ValueError):
+            self._tz = ZoneInfo(_DEFAULT_TIMEZONE)
+            self._tz_name = _DEFAULT_TIMEZONE
+
     def build(
         self,
         agent: Agent,
@@ -226,6 +285,7 @@ class PromptBuilder:
         channel: str = "widget",
         customer_name: str | None = None,
         is_returning_customer: bool = False,
+        now: datetime | None = None,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -235,6 +295,7 @@ class PromptBuilder:
             customer_name=customer_name,
             is_first_message=not history,
             is_returning_customer=is_returning_customer,
+            now=now,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -248,12 +309,14 @@ class PromptBuilder:
         customer_name: str | None = None,
         is_first_message: bool = False,
         is_returning_customer: bool = False,
+        now: datetime | None = None,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
 
         parts = [agent.system_prompt]
         parts.append(self._build_identity_block(agent, company_name))
+        parts.append(self._build_clock_block(now))
 
         parts.append(f"\nYour default language is {lang_label}.")
         parts.append(_BASE_BEHAVIOR)
@@ -281,7 +344,7 @@ class PromptBuilder:
             parts.append(escalation)
 
         if available_slots is not None:
-            parts.append(self._build_calendar_block(available_slots))
+            parts.append(self._build_calendar_block(available_slots, agent.agent_language))
 
         if file_context.strip():
             parts.append(_CONTEXT_HEADER.format(context=file_context.strip()))
@@ -398,23 +461,35 @@ class PromptBuilder:
 
         return _ESCALATION_HEADER + _ESCALATION_HINT + "\n".join(contacts)
 
-    def _build_calendar_block(self, slots: list[dict]) -> str:
-        import json
-        from datetime import datetime, timezone
+    def _build_clock_block(self, now: datetime | None) -> str:
+        """
+        The agent otherwise has no idea what time it is, so it can't say "boa
+        noite" at night or tell whether the business is open right now.
+        """
+        local = (now or datetime.now(timezone.utc)).astimezone(self._tz)
+        weekday = _WEEKDAYS["En"][local.weekday()]
+        return "\n".join([
+            "\n## Right now",
+            "",
+            f"It's {weekday}, {local:%d/%m/%Y}, {local:%H:%M} ({_timezone_label(self._tz_name)}).",
+            "- When you greet someone, match the time of day (in Portuguese: bom dia "
+            "until 12h, boa tarde until 18h, boa noite after).",
+            "- If they ask whether you're open now, check it against the opening hours "
+            "in the information below. If the hours aren't there, don't guess.",
+        ])
 
+    def _build_calendar_block(self, slots: list[dict], lang: str = "En") -> str:
         if not slots:
             return ""
 
-        def _fmt(iso: str) -> str:
-            try:
-                dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc)
-                return dt.strftime("%A, %b %-d at %-I:%M %p UTC")
-            except Exception:
-                return iso
-
-        slots_list = "\n".join(f"- {_fmt(s['start'])} → {_fmt(s['end'])}" for s in slots)
-        slots_json = json.dumps(slots)
-        return _CALENDAR_BLOCK_TEMPLATE.format(slots_list=slots_list, slots_json=slots_json)
+        slots_list = "\n".join(
+            f"- {_format_slot(s['start'], s['end'], self._tz, lang)}" for s in slots
+        )
+        return _CALENDAR_BLOCK_TEMPLATE.format(
+            slots_list=slots_list,
+            slots_json=json.dumps(slots),
+            tz_label=_timezone_label(self._tz_name),
+        )
 
     def _build_messages(self, history: list[ChatMessage], user_message: str) -> list[dict]:
         messages = [{"role": m.role, "content": m.content} for m in history]

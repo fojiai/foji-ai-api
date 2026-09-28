@@ -45,8 +45,11 @@ class AgentService:
             except (json.JSONDecodeError, TypeError):
                 starters = None
 
+        company = agent.company
         return {
             "name": agent.name,
+            # What the customer knows the business as — the widget greets with it.
+            "company_name": (company.trade_name or company.name) if company else None,
             "description": agent.description,
             "industry_type": agent.industry_type,
             "agent_language": agent.agent_language,

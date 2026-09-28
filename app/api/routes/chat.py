@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 _provider_router = ProviderRouter()
 _file_context_svc = FileContextService()
-_prompt_builder = PromptBuilder()
+_prompt_builder = PromptBuilder(get_settings().business_timezone)
 _history_svc = ChatHistoryService()
 _rate_limit_svc = RateLimitService()
 _calendar_svc = GoogleCalendarService()
@@ -187,6 +187,8 @@ async def _stream(
     conversation_start: bool = False,
 ) -> AsyncIterator[str]:
     last_error: Exception | None = None
+    # True while the widget is showing text from a provider that then failed.
+    partial_on_screen = False
 
     for i, provider in enumerate(providers):
         collected: list[str] = []
@@ -197,11 +199,19 @@ async def _stream(
             logger.debug(
                 "Trying provider %d/%d: %s", i + 1, len(providers), provider.provider_name
             )
+            # The next provider starts its answer from scratch. Without this the
+            # widget appended it to the half-answer already shown, so the
+            # customer read the start of the reply twice.
+            if partial_on_screen:
+                yield json.dumps({"reset": True})
+                partial_on_screen = False
+
             async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
                 async for chunk in provider.stream_chat(messages, system_prompt):
                     clean_chunk = reply_filter.feed(chunk)
                     if clean_chunk:
                         collected.append(clean_chunk)
+                        partial_on_screen = True
                         yield json.dumps({"chunk": clean_chunk})
 
             tail = reply_filter.flush()
@@ -260,9 +270,13 @@ async def _stream(
             )
             last_error = exc
 
-    # All providers failed
+    # All providers failed. Clear any half-answer, and send a neutral code rather
+    # than the provider's error text — that reached the browser, and the widget
+    # shows its own friendly, localised message anyway.
+    if partial_on_screen:
+        yield json.dumps({"reset": True})
     if isinstance(last_error, TimeoutError):
-        yield json.dumps({"error": "Response timed out. Please try again.", "done": True})
+        yield json.dumps({"error": "timeout", "done": True})
     else:
         logger.error("All %d provider(s) failed. Last error: %s", len(providers), last_error)
-        yield json.dumps({"error": f"AI provider error: {last_error}", "done": True})
+        yield json.dumps({"error": "unavailable", "done": True})

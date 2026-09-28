@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # starts a new one. WhatsApp matches Meta's 24h customer-service window.
     conversation_idle_timeout_whatsapp_seconds: int = 24 * 3600
     conversation_idle_timeout_widget_seconds: int = 30 * 60
+    # Clock the agent lives on: greetings by time of day, "are you open now?",
+    # and how appointment slots are shown. Brazil-first; per-company later.
+    business_timezone: str = "America/Sao_Paulo"
     file_context_max_chars: int = 50_000
     file_context_chunk_size: int = 4_000
     file_context_chunk_overlap: int = 200

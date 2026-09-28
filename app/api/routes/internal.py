@@ -152,7 +152,7 @@ async def whatsapp_chat(
     file_context = await file_ctx_svc.build(agent)
 
     # 4. Build prompt
-    system_prompt, messages = PromptBuilder().build(
+    system_prompt, messages = PromptBuilder(get_settings().business_timezone).build(
         agent=agent,
         user_message=body.message,
         history=history,
