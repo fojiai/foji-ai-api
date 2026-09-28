@@ -149,6 +149,7 @@ async def whatsapp_chat(
         history=history,
         file_context=file_context,
         channel="whatsapp",
+        customer_name=body.profile_name,
     )
 
     # 5. Select provider and collect full response (no streaming for WA)
