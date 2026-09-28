@@ -7,6 +7,7 @@ import boto3
 
 from app.core.config import get_settings
 from app.core.exceptions import ProviderException
+from app.providers.base import message_images
 from app.services.credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,20 @@ async def _get_client():
     return _client
 
 
+# The Converse API names the image format rather than taking a MIME type.
+_BEDROCK_IMAGE_FORMATS = {"image/jpeg": "jpeg", "image/jpg": "jpeg", "image/png": "png",
+                          "image/webp": "webp", "image/gif": "gif"}
+
+
+def _image_blocks(message: dict) -> list[dict]:
+    blocks = []
+    for data, mime in message_images(message):
+        fmt = _BEDROCK_IMAGE_FORMATS.get(mime.split(";")[0].strip().lower())
+        if fmt:  # anything else Converse can't take — send the text alone
+            blocks.append({"image": {"format": fmt, "source": {"bytes": data}}})
+    return blocks
+
+
 class BedrockProvider:
     provider_name = "bedrock"
 
@@ -60,7 +75,7 @@ class BedrockProvider:
     ) -> AsyncIterator[str]:
         client = await _get_client()
         bedrock_messages = [
-            {"role": m["role"], "content": [{"text": m["content"]}]}
+            {"role": m["role"], "content": [{"text": m["content"]}, *_image_blocks(m)]}
             for m in messages
         ]
 

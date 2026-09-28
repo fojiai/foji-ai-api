@@ -327,6 +327,7 @@ class PromptBuilder:
         is_voice_note: bool = False,
         team_in_chat: bool = False,
         team_already_called: bool = False,
+        has_photo: bool = False,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -340,6 +341,7 @@ class PromptBuilder:
             is_voice_note=is_voice_note,
             team_in_chat=team_in_chat,
             team_already_called=team_already_called,
+            has_photo=has_photo,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -357,6 +359,7 @@ class PromptBuilder:
         is_voice_note: bool = False,
         team_in_chat: bool = False,
         team_already_called: bool = False,
+        has_photo: bool = False,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
@@ -380,7 +383,7 @@ class PromptBuilder:
             parts.append(
                 self._build_customer_block(
                     customer_name, company_name, is_first_message, is_returning_customer,
-                    is_voice_note,
+                    is_voice_note, has_photo,
                 )
             )
 
@@ -462,6 +465,7 @@ class PromptBuilder:
         is_first_message: bool,
         is_returning_customer: bool = False,
         is_voice_note: bool = False,
+        has_photo: bool = False,
     ) -> str:
         """The person on the other end, and how to open the conversation (WhatsApp)."""
         name = _safe_customer_name(customer_name)
@@ -501,6 +505,19 @@ class PromptBuilder:
                 "transcription, so it may have small errors — interpret it generously and "
                 "never nitpick the wording. Reply in text as you normally would; a light "
                 "touch like \"ouvi seu áudio\" is fine but not required.",
+            ]
+
+        if has_photo:
+            lines += [
+                "",
+                "Their latest message includes a photo (attached). Look at it and respond "
+                "to what they actually need — a product they want, a problem they're "
+                "showing, a screenshot, a receipt. Refer to what you see naturally, the "
+                "way a person would, without describing the whole image back to them. If "
+                "you can't tell what they want from it, ask one short question.",
+                "- Never identify or guess who a person in a photo is from their face.",
+                "- If it shows documents, card numbers, IDs, addresses or other personal "
+                "data, never repeat those details back — just help with what they asked.",
             ]
         return "\n".join(lines)
 

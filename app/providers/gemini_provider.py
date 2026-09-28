@@ -6,6 +6,7 @@ from google.genai import types
 
 from app.core.config import get_settings
 from app.core.exceptions import ProviderException
+from app.providers.base import message_images
 from app.services.credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,11 @@ class GeminiProvider:
         gemini_contents = [
             types.Content(
                 role="user" if m["role"] == "user" else "model",
-                parts=[types.Part(text=m["content"])],
+                parts=[
+                    types.Part(text=m["content"]),
+                    # A photo the customer sent goes in as inline image bytes.
+                    *(types.Part.from_bytes(data=data, mime_type=mime) for data, mime in message_images(m)),
+                ],
             )
             for m in messages
         ]

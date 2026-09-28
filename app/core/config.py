@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     transcription_openai_model: str = "gpt-4o-mini-transcribe"
     transcription_gemini_model: str = "gemini-flash-lite-latest"
     voice_note_max_bytes: int = 16 * 1024 * 1024
+    # Photos (WhatsApp). Meta caps images at 5 MB.
+    photo_max_bytes: int = 5 * 1024 * 1024
     file_context_max_chars: int = 50_000
     file_context_chunk_size: int = 4_000
     file_context_chunk_overlap: int = 200

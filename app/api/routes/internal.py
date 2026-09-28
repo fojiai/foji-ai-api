@@ -59,6 +59,9 @@ class WhatsAppChatRequest(BaseModel):
     # here and answered like a typed message.
     audio_base64: str | None = None
     audio_mime: str | None = None
+    # A photo the customer sent (the caption, if any, is `message`).
+    image_base64: str | None = None
+    image_mime: str | None = None
     sender_phone: str | None = None  # the wa_id, used to create the CRM contact
     profile_name: str | None = None  # the sender's WhatsApp display name
     # Hybrid mode: the team can step into this chat, and the conversation lives
@@ -88,6 +91,33 @@ _HANDOFF_DEFAULT = {
     "Es": "Voy a llamar a alguien del equipo para que hable contigo, un momento 🙂",
     "En": "I'll bring someone from the team into this chat — just a moment 🙂",
 }
+
+
+async def _answer_with_failover(db, messages: list[dict], system_prompt: str, session_id: str, agent_id: int):
+    """Run the prompt on each active model in turn; return (text, provider).
+
+    Raises 503 only when every model failed or returned nothing — the worker
+    then sends the customer its friendly fallback.
+    """
+    providers = await ProviderRouter().select_all(db)
+    last_error: Exception | None = None
+    for provider in providers:
+        try:
+            chunks: list[str] = []
+            async for chunk in provider.stream_chat(messages, system_prompt):
+                chunks.append(chunk)
+            text = "".join(chunks)
+            if text.strip():
+                logger.info(
+                    "WhatsApp chat: session=%s agent_id=%d provider=%s", session_id, agent_id, provider.provider_name
+                )
+                return text, provider
+            last_error = ValueError("empty response")
+        except Exception as exc:  # noqa: BLE001 — try the next model
+            logger.warning("WhatsApp chat: provider %s failed: %s — trying next", provider.provider_name, exc)
+            last_error = exc
+    logger.error("WhatsApp chat: all %d provider(s) failed. Last error: %s", len(providers), last_error)
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No provider could answer")
 
 
 def _extract_handoff(text: str, agent) -> tuple[str, bool]:
@@ -249,6 +279,24 @@ async def whatsapp_chat(
         user_message = f"{user_message}\n\n{transcript}".strip() if user_message else transcript
         is_voice_note = True
 
+    # 2e. A photo. The model sees the image itself; the caption (if any) is the
+    # text. History only keeps "[imagem] caption" — the image isn't stored there.
+    photo: bytes | None = None
+    photo_mime = (body.image_mime or "image/jpeg").split(";")[0].strip().lower()
+    if body.image_base64:
+        try:
+            photo = base64.b64decode(body.image_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid image.")
+        if len(photo) > get_settings().photo_max_bytes or not photo_mime.startswith("image/"):
+            photo = None  # answer the caption alone rather than fail
+
+    history_message = user_message
+    if photo is not None:
+        history_message = f"[imagem] {user_message}".strip()
+        if not user_message:
+            user_message = "[The customer sent this photo without any text.]"
+
     if not user_message:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty message.")
 
@@ -266,23 +314,17 @@ async def whatsapp_chat(
         customer_name=body.profile_name,
         is_returning_customer=conversation.is_returning,
         is_voice_note=is_voice_note,
+        has_photo=photo is not None,
         team_in_chat=body.hybrid,
         team_already_called=body.hybrid and body.awaiting_human,
     )
+    if photo is not None:
+        messages[-1]["images"] = [{"data": photo, "mime": photo_mime}]
 
-    # 5. Select provider and collect full response (no streaming for WA)
-    provider = await ProviderRouter().select(db)
-    logger.info(
-        "WhatsApp chat: session=%s agent_id=%d provider=%s",
-        body.session_id,
-        agent.id,
-        provider.provider_name,
-    )
-
-    chunks: list[str] = []
-    async for chunk in provider.stream_chat(messages, system_prompt):
-        chunks.append(chunk)
-    raw = "".join(chunks)
+    # 5. Try each active model until one answers (same failover as the widget).
+    # A single pick used to mean one model's hiccup cost the customer their
+    # reply — and not every model takes images.
+    raw, provider = await _answer_with_failover(db, messages, system_prompt, body.session_id, agent.id)
     # Hybrid: the model calls the team with a marker on its last line.
     handoff = False
     if body.hybrid:
@@ -304,7 +346,7 @@ async def whatsapp_chat(
     try:
         await history_svc.save(
             session_id=body.session_id,
-            user_message=user_message,
+            user_message=history_message,
             assistant_message=reply,
             provider=provider.provider_name,
             agent_id=agent.id,

@@ -1,8 +1,10 @@
+import base64
 import logging
 from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 
+from app.providers.base import message_images
 from app.core.config import get_settings
 from app.core.exceptions import ProviderException
 from app.services.credentials_service import get_credential
@@ -27,6 +29,19 @@ async def _get_client() -> AsyncOpenAI:
     return _client
 
 
+def _to_openai(message: dict) -> dict:
+    """Only role/content go to OpenAI (it rejects unknown keys); an attached
+    photo becomes an image_url part carrying a data URI."""
+    images = message_images(message)
+    if not images:
+        return {"role": message["role"], "content": message["content"]}
+    parts: list[dict] = [{"type": "text", "text": message["content"]}]
+    for data, mime in images:
+        encoded = base64.b64encode(data).decode("ascii")
+        parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}})
+    return {"role": message["role"], "content": parts}
+
+
 class OpenAIProvider:
     provider_name = "openai"
 
@@ -39,7 +54,10 @@ class OpenAIProvider:
         system_prompt: str,
     ) -> AsyncIterator[str]:
         client = await _get_client()
-        full_messages = [{"role": "system", "content": system_prompt}, *messages]
+        full_messages = [
+            {"role": "system", "content": system_prompt},
+            *(_to_openai(m) for m in messages),
+        ]
         try:
             stream = await client.chat.completions.create(
                 model=self._model_id,
