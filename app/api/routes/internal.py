@@ -68,6 +68,8 @@ class WhatsAppChatRequest(BaseModel):
     # The inbound message being answered — already recorded in the inbox thread
     # by the worker, so it's left out of the history.
     exclude_wam_id: str | None = None
+    # Hybrid: the team was already called for this customer and hasn't answered.
+    awaiting_human: bool = False
 
 
 class WhatsAppChatResponse(BaseModel):
@@ -265,6 +267,7 @@ async def whatsapp_chat(
         is_returning_customer=conversation.is_returning,
         is_voice_note=is_voice_note,
         team_in_chat=body.hybrid,
+        team_already_called=body.hybrid and body.awaiting_human,
     )
 
     # 5. Select provider and collect full response (no streaming for WA)
@@ -284,6 +287,10 @@ async def whatsapp_chat(
     handoff = False
     if body.hybrid:
         raw, handoff = _extract_handoff(raw, agent)
+        # Already called and still waiting: never re-escalate, even if the
+        # model adds the marker anyway (it's stripped either way).
+        if body.awaiting_human:
+            handoff = False
     # Backstop for "according to my documents"-style tics the prompt forbids.
     reply = clean_reply(raw).strip()
 

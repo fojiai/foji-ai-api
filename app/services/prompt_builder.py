@@ -148,6 +148,22 @@ problem. When you do:
 Only use the marker in those cases, and never mention or explain it.
 """
 
+# Hybrid, when the team was already called for this customer and nobody has
+# answered yet. Calling again would do nothing; reassure and keep helping.
+_TEAM_ALREADY_CALLED = """
+## Your team is in this chat — and has already been called
+
+People from the team can join this same WhatsApp conversation. In the history,
+messages that start with a name and a colon (e.g. "Ana:") were written by one of
+them — treat them as your teammates' words and stay consistent with them.
+
+This person already asked for someone from the team. The team has been notified
+and will reply right here as soon as they can. Don't call them again and don't
+use any marker. If they ask about it, reassure them briefly and honestly (the
+team has their message and will answer here) — don't promise a time — and keep
+helping with whatever you can in the meantime.
+"""
+
 _STYLE_OVERRIDES: dict[str, str] = {
     "Friendly": """
 ## Response Style: Friendly
@@ -310,6 +326,7 @@ class PromptBuilder:
         now: datetime | None = None,
         is_voice_note: bool = False,
         team_in_chat: bool = False,
+        team_already_called: bool = False,
     ) -> tuple[str, list[dict]]:
         system_prompt = self._build_system_prompt(
             agent,
@@ -322,6 +339,7 @@ class PromptBuilder:
             now=now,
             is_voice_note=is_voice_note,
             team_in_chat=team_in_chat,
+            team_already_called=team_already_called,
         )
         messages = self._build_messages(history, user_message)
         return system_prompt, messages
@@ -338,6 +356,7 @@ class PromptBuilder:
         now: datetime | None = None,
         is_voice_note: bool = False,
         team_in_chat: bool = False,
+        team_already_called: bool = False,
     ) -> str:
         lang_label = _LANGUAGE_MAP.get(agent.agent_language, "English")
         company_name = self._company_display_name(agent)
@@ -371,7 +390,7 @@ class PromptBuilder:
         if team_in_chat:
             # Hybrid mode: a person is reachable right here, so "offer a human"
             # means calling them in — not sending the customer to another number.
-            parts.append(_TEAM_IN_CHAT)
+            parts.append(_TEAM_ALREADY_CALLED if team_already_called else _TEAM_IN_CHAT)
         else:
             escalation = self._build_escalation_block(agent)
             if escalation:
