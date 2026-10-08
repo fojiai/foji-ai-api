@@ -58,6 +58,17 @@ async def health():
 # ── Startup log ──────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    # Index chats already in DynamoDB for the conversation history list. Runs
+    # once against an empty table; in the background so startup isn't held up.
+    try:
+        import asyncio
+
+        from app.services.chat_history import ChatHistoryService
+        from app.services.chat_index import backfill_if_empty
+
+        asyncio.get_running_loop().create_task(backfill_if_empty(ChatHistoryService()._table))
+    except Exception:
+        logger.warning("Chat history backfill not started", exc_info=True)
     logger.info(
         "foji-ai-api started | env=%s | cors_origins=%s | cors_regex=%s",
         settings.environment,

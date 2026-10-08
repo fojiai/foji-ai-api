@@ -17,7 +17,7 @@ import secrets
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Header, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -188,6 +188,13 @@ async def _capture_whatsapp_lead(
         logger.warning("WhatsApp lead capture failed for agent %d: %s", agent_id, exc)
 
 
+def scoped_whatsapp_session(session_id: str, agent_id: int) -> str:
+    """"wa:<phone>" → "wa:<agent_id>:<phone>". Anything else is returned as is."""
+    if session_id.startswith("wa:") and session_id.count(":") == 1:
+        return f"wa:{agent_id}:{session_id[3:]}"
+    return session_id
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -214,6 +221,11 @@ async def whatsapp_chat(
     # window): the next message starts fresh instead of dragging in stale context.
     history_svc = ChatHistoryService()
     idle = get_settings().conversation_idle_timeout_whatsapp_seconds
+    # The worker sends "wa:<phone>". Keyed by phone alone, the same customer
+    # writing to two businesses shared one log, and each AI read the other's
+    # chat as context. Key it per agent; until the old log ages out (90-day
+    # TTL), read it too, filtered to this agent's own messages.
+    session_key = scoped_whatsapp_session(body.session_id, agent.id)
     if body.hybrid and body.inbox_conversation_id:
         # Hybrid: the inbox thread is the whole conversation — customer, AI and
         # whatever the team wrote while they had it.
@@ -225,7 +237,11 @@ async def whatsapp_chat(
             max_messages=get_settings().chat_history_max_messages,
         )
     else:
-        conversation = await history_svc.load_conversation(body.session_id, idle_timeout_seconds=idle)
+        conversation = await history_svc.load_conversation(session_key, idle_timeout_seconds=idle)
+        if conversation.is_new and not conversation.is_returning and session_key != body.session_id:
+            legacy = await history_svc.load_conversation(body.session_id, idle_timeout_seconds=idle, agent_id=agent.id)
+            if legacy.messages or legacy.is_returning:
+                conversation = legacy
     history = conversation.messages
 
     # 2b. Enforce subscription + monthly limits on WhatsApp too, before any
@@ -342,16 +358,17 @@ async def whatsapp_chat(
     # 6. Save history (best-effort — never fail the request)
     try:
         await history_svc.save(
-            session_id=body.session_id,
+            session_id=session_key,
             user_message=history_message,
             assistant_message=reply,
             provider=provider.provider_name,
             agent_id=agent.id,
             company_id=agent.company_id,
             conversation_start=conversation.is_new,
+            contact_name=body.profile_name,
         )
     except Exception:
-        logger.warning("Failed to save WhatsApp chat history for session=%s", body.session_id)
+        logger.warning("Failed to save WhatsApp chat history for session=%s", session_key)
 
     return WhatsAppChatResponse(reply=reply, session_id=body.session_id, handoff=handoff)
 
@@ -442,3 +459,18 @@ class PurgeChatHistoryRequest(BaseModel):
 async def purge_chat_history(body: PurgeChatHistoryRequest) -> dict:
     deleted = await ChatHistoryService().purge_company(body.company_id)
     return {"deleted": deleted}
+
+
+class ChatLogRequest(BaseModel):
+    session_id: str = Field(max_length=100)
+    agent_id: int
+
+
+@router.post(
+    "/chat-history/messages",
+    dependencies=[Depends(verify_internal_key)],
+    summary="The stored messages of one chat, for FojiApi's conversation history",
+)
+async def chat_log(body: ChatLogRequest) -> dict:
+    messages = await ChatHistoryService().messages_for(body.session_id, body.agent_id)
+    return {"messages": messages}

@@ -31,6 +31,7 @@ import boto3
 from boto3.dynamodb.conditions import Attr, Key
 
 from app.core.config import get_settings
+from app.services.chat_index import record_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ class ChatHistoryService:
         return (await self.load_conversation(session_id, idle_timeout_seconds=None)).messages
 
     async def load_conversation(
-        self, session_id: str, idle_timeout_seconds: int | None
+        self, session_id: str, idle_timeout_seconds: int | None, agent_id: int | None = None
     ) -> Conversation:
         """
         Return the conversation in progress on this session.
@@ -166,10 +167,7 @@ class ChatHistoryService:
         try:
             response = await asyncio.to_thread(
                 self._table.query,
-                KeyConditionExpression=Key("session_id").eq(session_id),
-                ScanIndexForward=False,  # newest first
-                # One past the cap, so a gap just beyond the window is still visible.
-                Limit=self._max_messages + 1,
+                **self._query_kwargs(session_id, agent_id),
             )
             return _split_current_conversation(
                 response.get("Items", []),
@@ -180,6 +178,46 @@ class ChatHistoryService:
         except Exception:
             logger.exception("Failed to load chat history for session %s", session_id)
             return Conversation(messages=[], is_new=True, is_returning=False)
+
+    def _query_kwargs(self, session_id: str, agent_id: int | None) -> dict:
+        kwargs = {
+            "KeyConditionExpression": Key("session_id").eq(session_id),
+            "ScanIndexForward": False,  # newest first
+            # One past the cap, so a gap just beyond the window is still visible.
+            "Limit": self._max_messages + 1,
+        }
+        if agent_id is not None:
+            # A filter applies after Limit, so without a cap the page could be
+            # all someone else's messages. Old shared WhatsApp keys are rare and
+            # short-lived (90-day TTL); read a wider page for them.
+            kwargs["FilterExpression"] = Attr("agent_id").eq(agent_id)
+            kwargs["Limit"] = 200
+        return kwargs
+
+    async def messages_for(self, session_id: str, agent_id: int, limit: int = 1000) -> list[dict]:
+        """The whole stored log of one chat, oldest first, for the history screen."""
+        def run() -> list[dict]:
+            out: list[dict] = []
+            kwargs = {
+                "KeyConditionExpression": Key("session_id").eq(session_id),
+                "FilterExpression": Attr("agent_id").eq(agent_id),
+                "ScanIndexForward": True,
+            }
+            while len(out) < limit:
+                resp = self._table.query(**kwargs)
+                for item in resp.get("Items", []):
+                    out.append({
+                        "role": str(item.get("role", "")),
+                        "content": str(item.get("content", "")),
+                        "timestamp": int(item["timestamp"]),
+                    })
+                last = resp.get("LastEvaluatedKey")
+                if not last:
+                    break
+                kwargs["ExclusiveStartKey"] = last
+            return out[:limit]
+
+        return await asyncio.to_thread(run)
 
     async def save(
         self,
@@ -192,6 +230,7 @@ class ChatHistoryService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         conversation_start: bool = False,
+        contact_name: str | None = None,
     ) -> None:
         """Persist the user/assistant pair. Fire-and-forget friendly.
 
@@ -240,6 +279,9 @@ class ChatHistoryService:
             await asyncio.to_thread(self._write_batch, items)
         except Exception:
             logger.exception("Failed to save chat history for session %s", session_id)
+            return
+
+        await record_exchange(session_id, agent_id, company_id, assistant_message, contact_name)
 
     def _write_batch(self, items: list[dict]) -> None:
         """Sync batch write — runs in a thread via asyncio.to_thread."""
