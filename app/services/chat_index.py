@@ -85,7 +85,15 @@ async def record_exchange(
 _BACKFILL_LOCK = 734_221_901  # arbitrary pg advisory-lock id for this job
 
 
-async def backfill_if_empty(table) -> None:
+async def backfill_with_retry(table, attempts: int = 12, wait_seconds: int = 300) -> None:
+    """The table arrives with FojiApi's migration, which may deploy after us."""
+    for _ in range(attempts):
+        if await backfill_if_empty(table):
+            return
+        await asyncio.sleep(wait_seconds)
+
+
+async def backfill_if_empty(table) -> bool:
     """
     Index the chats already in DynamoDB (the last 90 days) the first time this
     runs against an empty ChatSessions table. Several API tasks may start at
@@ -96,11 +104,14 @@ async def backfill_if_empty(table) -> None:
         async with get_session_factory()() as db:
             got = (await db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _BACKFILL_LOCK})).scalar()
             if not got:
-                return
+                return True  # another task is on it
             try:
+                exists = (await db.execute(text("SELECT to_regclass('\"ChatSessions\"') IS NOT NULL"))).scalar()
+                if not exists:
+                    return False
                 empty = (await db.execute(text('SELECT NOT EXISTS (SELECT 1 FROM "ChatSessions")'))).scalar()
                 if not empty:
-                    return
+                    return True
                 agents = {
                     r[0]: r[1]
                     for r in (await db.execute(text('SELECT "Id", "CompanyId" FROM "Agents"'))).all()
@@ -115,11 +126,13 @@ async def backfill_if_empty(table) -> None:
                     await db.execute(_UPSERT, rows[i : i + 500])
                 await db.commit()
                 logger.info("Chat history index backfilled with %d chats", len(rows))
+                return True
             finally:
                 await db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _BACKFILL_LOCK})
                 await db.commit()
     except Exception:
-        logger.warning("Chat history backfill skipped", exc_info=True)
+        logger.warning("Chat history backfill failed; will retry", exc_info=True)
+        return False
 
 
 def _scan_sessions(table) -> dict:

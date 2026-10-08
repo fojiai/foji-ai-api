@@ -64,9 +64,9 @@ async def on_startup():
         import asyncio
 
         from app.services.chat_history import ChatHistoryService
-        from app.services.chat_index import backfill_if_empty
+        from app.services.chat_index import backfill_with_retry
 
-        asyncio.get_running_loop().create_task(backfill_if_empty(ChatHistoryService()._table))
+        asyncio.get_running_loop().create_task(backfill_with_retry(ChatHistoryService()._table))
     except Exception:
         logger.warning("Chat history backfill not started", exc_info=True)
     logger.info(
